@@ -3,7 +3,7 @@
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 import pyodbc
-from config import Config
+from app.config import Config
 
 class DatabaseConnectionError(Exception):
     pass
