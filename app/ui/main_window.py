@@ -146,6 +146,10 @@ class MainWindow(QMainWindow):
             # Get column information
             columns = self.db_service.get_columns_info(schema, table_name)
 
+            if not columns:
+                QMessageBox.warning(self, "No Columns", f"Table {schema}.{table_name} has no columns")
+                return
+
             # Build and execute SELECT query
             qualified_table = f"{schema}.{table_name}"
             query = f"SELECT * FROM {qualified_table}"
@@ -158,9 +162,10 @@ class MainWindow(QMainWindow):
             # Load columns into grid
             self.data_grid.load_data(columns, rows, editable=False)
             
-            self.status_label.setText(f"Selected: {schema}.{table_name} - {len(columns)} columns")
+            row_count = len(rows) if rows else 0
+            self.status_label.setText(f"Selected: {qualified_table} - {len(columns)} columns, {row_count} rows")
         except Exception as e:
-            QMessageBox.critical(self, "Error Loading Table", f"Failed to load table structure: {e}")
+            QMessageBox.critical(self, "Error Loading Table", f"Failed to load table data: {e}")
             self.status_label.setText("Error loading table")
     
     def _connect_database(self) -> None:
