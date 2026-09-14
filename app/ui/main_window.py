@@ -134,7 +134,7 @@ class MainWindow(QMainWindow):
     def _on_table_selected(self, item: QTreeWidgetItem) -> None:
         """Handle table selection from list."""
         try:
-            table_info = item.data(Qt.ItemDataRole.UserRole)
+            table_info = item.data(0, Qt.ItemDataRole.UserRole)
 
             # Only process if it's a table item (has table_info), not a schema node
             if table_info is None:
