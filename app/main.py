@@ -4,7 +4,7 @@ import sys
 import logging
 from PyQt6.QtWidgets import QApplication
 from app.config import Config
-from app.window import MainWindow
+from app.ui.main_window import MainWindow
 
 def setup_logging(config: Config) -> None:
     logging_config = config.logging_config
