@@ -150,7 +150,11 @@ class MainWindow(QMainWindow):
             qualified_table = f"{schema}.{table_name}"
             query = f"SELECT * FROM {qualified_table}"
             rows = self.db_service.execute_query(query)
-            
+
+            # Handle empty results gracefully
+            if rows is None:
+                rows = []
+                
             # Load columns into grid
             self.data_grid.load_data(columns, rows, editable=False)
             
