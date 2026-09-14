@@ -24,6 +24,8 @@ class MainWindow(QMainWindow):
         self.user_defined_schemas = []
         self.all_tables_info = []
         self.current_table_primary_keys = []
+        self._current_table_schema = None
+        self._current_table_name = None
 
         self._update_database_info_cache()
 
@@ -94,6 +96,7 @@ class MainWindow(QMainWindow):
         # Dynamic grid (right panel for columns/data)
         self.data_grid = DynamicGrid()
         self.data_grid.itemSelectionChanged.connect(self._on_grid_row_changed) 
+        self.data_grid.rowLostFocus.connect(self._on_grid_lost_focus) 
         splitter.addWidget(self.data_grid)
         
         # Set reasonable split sizes
@@ -103,6 +106,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(splitter, 1)
         widget.setLayout(layout)
         return widget
+    
+    def _on_grid_lost_focus(self, row_idx: int) -> None:
+        """Save row when grid loses focus."""
+        if self.data_grid.is_row_dirty(row_idx):
+            self._save_grid_row(row_idx)
+
     def _on_grid_row_changed(self) -> None:
         """Handle row selection change in grid - save previous row if dirty."""
         current_row = self.data_grid.currentRow()
@@ -118,33 +127,60 @@ class MainWindow(QMainWindow):
 
     def _save_grid_row(self, row_idx: int) -> None:
         """Save a single row if it has been modified."""
+        print(f"DEBUG: _save_grid_row() called for row {row_idx}")
+        
         if not self.data_grid.is_row_dirty(row_idx):
+            print(f"DEBUG: Row {row_idx} is not dirty, skipping save")
+            return
+
+        # Get only changed columns
+        changed_columns = self.data_grid.get_changed_columns(row_idx)
+
+        # Check if anything actually changed
+        if not changed_columns:
+            print(f"DEBUG: Row {row_idx} marked dirty but no actual changes detected, skipping update")
+            self.data_grid.clear_dirty_flag(row_idx)
             return
         
         if not hasattr(self, 'current_table_primary_keys') or not self.current_table_primary_keys:
-            QMessageBox.warning(self, "Cannot Save", "No primary key found for this table")
+            error_msg = "No primary key found for this table"
+            print(f"DEBUG: ERROR - {error_msg}")
+            QMessageBox.warning(self, "Cannot Save", error_msg)
             return
         
         try:
             schema = self._current_table_schema
             table_name = self._current_table_name
             
+            print(f"DEBUG: Saving row {row_idx} from {schema}.{table_name}")
+            
             # Get original PK values
             original_row = self.data_grid.get_original_row_data(row_idx)
-            current_row = self.data_grid.get_row_data(row_idx)
+            
+            print(f"DEBUG: Original row: {original_row}")
+            print(f"DEBUG: Changed columns: {changed_columns}")
             
             # Build PK dict from original values (in case user modified PK)
             pk_dict = {pk: original_row.get(pk) for pk in self.current_table_primary_keys}
+            print(f"DEBUG: Primary keys for WHERE clause: {pk_dict}")
             
             # Update database
-            self.db_service.update_row(schema, table_name, pk_dict, current_row)
+            print(f"DEBUG: Calling db_service.update_row()")
+            result = self.db_service.update_row(schema, table_name, pk_dict, changed_columns)
+            print(f"DEBUG: update_row() returned: {result}")
             
             # Clear dirty flag
             self.data_grid.clear_dirty_flag(row_idx)
-            self.status_label.setText(f"Saved row {row_idx + 1}")
+            self.status_label.setText(f"Saved row {row_idx + 1} ({len(changed_columns)} column(s) updated)")
+            print(f"DEBUG: Row {row_idx} saved successfully")
             
         except Exception as e:
-            QMessageBox.critical(self, "Save Error", f"Failed to save row: {e}")
+            error_msg = f"Failed to save row: {str(e)}"
+            print(f"DEBUG: EXCEPTION - {error_msg}")
+            print(f"DEBUG: Exception type: {type(e).__name__}")
+            import traceback
+            print(f"DEBUG: Traceback:\n{traceback.format_exc()}")
+            QMessageBox.critical(self, "Save Error", error_msg)
 
     def _populate_table_list(self) -> None:
         """Populate the tree with schemas as parent nodes and tables as children."""
@@ -186,6 +222,9 @@ class MainWindow(QMainWindow):
 
             schema = table_info['TABLE_SCHEMA']
             table_name = table_info['TABLE_NAME']
+
+            self._current_table_schema = schema
+            self._current_table_name = table_name   
 
             #get pk information
             self.current_table_primary_keys = self.db_service.get_table_primary_keys(schema, table_name)

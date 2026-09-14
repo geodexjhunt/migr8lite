@@ -105,16 +105,40 @@ class DatabaseService:
     def update_row(self, schema: str, table: str, primary_keys: Dict[str, Any], 
                 updated_values: Dict[str, Any]) -> bool:
         """Update a single row using primary keys as WHERE clause."""
-        # Build SET clause
-        set_clause = ", ".join([f"{col} = ?" for col in updated_values.keys()])
+        print(f"DEBUG: update_row() called")
+        print(f"DEBUG: Table: {schema}.{table}")
+        print(f"DEBUG: Primary keys: {primary_keys}")
+        print(f"DEBUG: Updated values: {updated_values}")
         
-        # Build WHERE clause from primary keys
-        where_clause = " AND ".join([f"{col} = ?" for col in primary_keys.keys()])
-        
-        query = f"UPDATE {schema}.{table} SET {set_clause} WHERE {where_clause}"
-        params = tuple(updated_values.values()) + tuple(primary_keys.values())
-        
-        # Execute with error handling
-        with self.get_cursor() as cursor:
+        try:
+            # Build SET clause
+            set_clause = ", ".join([f"[{col}] = ?" for col in updated_values.keys()])
+            
+            # Build WHERE clause from primary keys
+            where_clause = " AND ".join([f"[{col}] = ?" for col in primary_keys.keys()])
+            
+            query = f"UPDATE [{schema}].[{table}] SET {set_clause} WHERE {where_clause}"
+            params = tuple(updated_values.values()) + tuple(primary_keys.values())
+            
+            print(f"DEBUG: SQL Query: {query}")
+            print(f"DEBUG: Parameters: {params}")
+            
+            cursor = self._connection.cursor()
             cursor.execute(query, params)
-        return True
+            self._connection.commit()
+            rows_affected = cursor.rowcount
+            
+            print(f"DEBUG: Rows affected: {rows_affected}")
+            if rows_affected == 0:
+                print(f"DEBUG: WARNING - No rows matched the WHERE clause")
+            
+            cursor.close()
+            return True
+            
+        except Exception as e:
+            print(f"DEBUG: update_row() EXCEPTION: {str(e)}")
+            print(f"DEBUG: Exception type: {type(e).__name__}")
+            import traceback
+            print(f"DEBUG: Traceback:\n{traceback.format_exc()}")
+            self._connection.rollback()
+            raise

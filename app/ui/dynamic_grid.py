@@ -1,10 +1,14 @@
 """Dynamic grid widget for displaying table data."""
 
 from typing import Dict, List, Optional, Any
-from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem
-from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem,QAbstractItemView
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFocusEvent
 
 class DynamicGrid(QTableWidget):
+    # Add this signal at class level
+    rowLostFocus = pyqtSignal(int)  # Emits row index when focus leaves
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.column_metadata: Dict[str, Dict] = {}
@@ -14,9 +18,38 @@ class DynamicGrid(QTableWidget):
         self.setAlternatingRowColors(True)
         self.horizontalHeader().setStretchLastSection(True)
 
+        # Enable editing
+        self.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked | 
+            QAbstractItemView.EditTrigger.SelectedClicked |
+            QAbstractItemView.EditTrigger.AnyKeyPressed
+        )
+        
         # Connect cell change signal
         self.itemChanged.connect(self._on_cell_changed)
-    
+
+    def focusOutEvent(self, event: QFocusEvent) -> None:
+        """Emit signal when grid loses focus."""
+        current_row = self.currentRow()
+        if current_row >= 0:
+            print(f"DEBUG [Grid]: focusOutEvent - row {current_row} lost focus")
+            self.rowLostFocus.emit(current_row)
+        super().focusOutEvent(event)
+
+    def mousePressEvent(self, event):
+        """Handle mouse clicks - save current row if clicking outside data area."""
+        # Get the item at click position
+        item = self.itemAt(event.pos())
+        
+        current_row = self.currentRow()
+        
+        # If clicking in empty space or different row, emit signal
+        if item is None and current_row >= 0:
+            print(f"DEBUG [Grid]: Click in empty space while on row {current_row}")
+            self.rowLostFocus.emit(current_row)
+        
+        super().mousePressEvent(event)
+
     def load_data(self, columns: List[Dict], rows: List[Dict], editable: bool = True) -> None:
         """Load data into grid based on schema and rows.
         
@@ -25,9 +58,16 @@ class DynamicGrid(QTableWidget):
             rows: List of data row dicts
             editable: Whether grid cells are editable
         """
+        #print(f"DEBUG [Grid]: load_data() called with {len(rows)} rows")
+        #print(f"DEBUG [Grid]: Columns: {[col['COLUMN_NAME'] for col in columns]}")  
+
         self.row_data = rows
+        self.original_row_data = [row.copy() for row in rows]
         self.column_metadata = {col['COLUMN_NAME']: col for col in columns}
-        
+
+        #print(f"DEBUG [Grid]: Original row data stored: {self.original_row_data}")
+        self.dirty_rows.clear()
+
         column_names = [col['COLUMN_NAME'] for col in columns]
         self.setColumnCount(len(column_names))
         self.setHorizontalHeaderLabels(column_names)
@@ -67,7 +107,10 @@ class DynamicGrid(QTableWidget):
     def get_original_row_data(self, row_idx: int) -> Dict[str, Any]:
         """Get original data for a specific row (before edits)."""
         if row_idx < len(self.original_row_data):
-            return self.original_row_data[row_idx].copy()
+            data = self.original_row_data[row_idx].copy()
+            #print(f"DEBUG [Grid]: get_original_row_data({row_idx}) returning: {data}")
+            return data
+        #print(f"DEBUG [Grid]: get_original_row_data({row_idx}) - row index out of bounds")
         return {}
 
     def is_row_dirty(self, row_idx: int) -> bool:
@@ -89,3 +132,26 @@ class DynamicGrid(QTableWidget):
                 row_dict[col_name] = item.text() if item else None
             rows.append(row_dict)
         return rows
+    
+    def has_row_actually_changed(self, row_idx: int) -> bool:
+        """Check if row data has actually changed from original."""
+        return len(self.get_changed_columns(row_idx)) > 0
+
+    def get_changed_columns(self, row_idx: int) -> Dict[str, Any]:
+        """Return only the columns that have actually changed.
+        Returns dict of {column_name: new_value} or empty dict if no changes."""
+        if row_idx >= len(self.original_row_data):
+            return {}
+        
+        original = self.original_row_data[row_idx]
+        current = self.get_row_data(row_idx)
+        
+        # Compare each column value
+        changed = {}
+        for col_name in original.keys():
+            if str(original.get(col_name, "")) != str(current.get(col_name, "")):
+                changed[col_name] = current.get(col_name)
+                #print(f"DEBUG [Grid]: Column '{col_name}' changed: '{original.get(col_name)}' -> '{current.get(col_name)}'")
+        
+        return changed
+    
