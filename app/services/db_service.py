@@ -3,7 +3,7 @@
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 import pyodbc
-from app.config import Config
+from config.config import Config
 
 class DatabaseConnectionError(Exception):
     pass
@@ -101,6 +101,13 @@ class DatabaseService:
         """
         results = self.execute_query(query, (schema, table))
         return [r['COLUMN_NAME'] for r in results]
+
+    def get_dropdown_values(self, ref_schema: str, ref_table: str, 
+                            ref_column_key: str, ref_column_desc: str) -> List[Dict]:
+        """Fetch lookup values for a dropdown."""
+        query = f"SELECT DISTINCT [{ref_column_key}] as refkey, [{ref_column_desc}] as refdesc FROM [{ref_schema}].[{ref_table}] ORDER BY [{ref_column_key}]"
+        print(f"DEBUG: Dropdown query: {query}")
+        return self.execute_query(query)
 
     def update_row(self, schema: str, table: str, primary_keys: Dict[str, Any], 
                 updated_values: Dict[str, Any]) -> bool:

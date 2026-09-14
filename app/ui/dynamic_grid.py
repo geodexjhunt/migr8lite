@@ -1,7 +1,7 @@
 """Dynamic grid widget for displaying table data."""
 
 from typing import Dict, List, Optional, Any
-from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem,QAbstractItemView
+from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem,QAbstractItemView,QComboBox
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFocusEvent
 
@@ -100,8 +100,14 @@ class DynamicGrid(QTableWidget):
         row_dict = {}
         for col_idx in range(self.columnCount()):
             col_name = self.horizontalHeaderItem(col_idx).text()
-            item = self.item(row_idx, col_idx)
-            row_dict[col_name] = item.text() if item else None
+
+            # Check if cell is a dropdown
+            widget = self.cellWidget(row_idx, col_idx)
+            if isinstance(widget, QComboBox):
+                row_dict[col_name] = widget.currentData()
+            else:
+                item = self.item(row_idx, col_idx)
+                row_dict[col_name] = item.text() if item else None
         return row_dict
 
     def get_original_row_data(self, row_idx: int) -> Dict[str, Any]:
@@ -154,4 +160,41 @@ class DynamicGrid(QTableWidget):
                 #print(f"DEBUG [Grid]: Column '{col_name}' changed: '{original.get(col_name)}' -> '{current.get(col_name)}'")
         
         return changed
-    
+
+
+    def set_column_dropdown(self, col_idx: int, dropdown_values: List[Dict]) -> None:
+        """Set a column to use a dropdown for all rows."""
+        print(f"DEBUG [Grid]: Setting column {col_idx} as dropdown with {len(dropdown_values)} values")
+        
+        for row_idx in range(self.rowCount()):
+            combo = QComboBox()
+            
+            # Add blank option
+            combo.addItem("", None)
+            
+            # Add dropdown options
+            for item in dropdown_values:
+                key = item.get('refkey')
+                desc = item.get('refdesc', key)
+                display_text = f"{key} ({desc})"  # Show both
+                combo.addItem(display_text, key)  # Store only key
+            
+            # Set current value if row has data
+            current_cell = self.item(row_idx, col_idx)
+            if current_cell:
+                current_value = current_cell.text()
+                index = combo.findData(current_value)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+            
+            # Track changes
+            combo.currentIndexChanged.connect(
+                lambda checked, r=row_idx, c=col_idx: self._on_dropdown_changed(r, c, combo)
+            )
+            
+            self.setCellWidget(row_idx, col_idx, combo)
+
+    def _on_dropdown_changed(self, row_idx: int, col_idx: int, combo: QComboBox) -> None:
+        """Handle dropdown selection change."""
+        self.dirty_rows.add(row_idx)
+        print(f"DEBUG [Grid]: Dropdown changed at row {row_idx}, col {col_idx}: {combo.currentData()}")

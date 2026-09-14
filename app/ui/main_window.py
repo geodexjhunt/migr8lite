@@ -3,10 +3,11 @@
 from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTabWidget, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QTreeWidget, QTreeWidgetItem
 from PyQt6.QtGui import QFont
 from PyQt6.QtCore import Qt
-from app.config import Config
+from config.config import Config
 from app.services.db_service import DatabaseService
 from app.models.migration_state import JobStateManager
 from app.ui.dynamic_grid import DynamicGrid
+from config.dropdown_config import DROPDOWN_LOOKUPS
 
 class MainWindow(QMainWindow):
     def __init__(self, config: Config):
@@ -247,12 +248,46 @@ class MainWindow(QMainWindow):
                 
             # Load columns into grid
             self.data_grid.load_data(columns, rows, editable=True)
+
+            # Apply dropdowns to configured columns
+            self._apply_dropdowns_to_grid(schema, table_name, columns)         
             
             row_count = len(rows) if rows else 0
             self.status_label.setText(f"Selected: {qualified_table} - {len(columns)} columns, {row_count} rows")
         except Exception as e:
             QMessageBox.critical(self, "Error Loading Table", f"Failed to load table data: {e}")
             self.status_label.setText("Error loading table")
+
+    def _apply_dropdowns_to_grid(self, schema: str, table_name: str, columns: list[dict]) -> None:
+        """Apply dropdown lookups to configured columns."""
+
+        # Find matching config for this table
+        for config in DROPDOWN_LOOKUPS:
+            if config['schema'] == schema and config['table'] == table_name:
+                print(f"DEBUG: Found matching dropdown config for {schema}.{table_name}")
+                # Find column index
+                col_name = config['column']
+                col_idx = next((i for i, col in enumerate(columns) 
+                            if col['COLUMN_NAME'] == col_name), None)
+                
+                if col_idx is not None:
+                    print(f"DEBUG: Applying dropdown to column {col_name} at index {col_idx}")
+                    try:
+                        # Fetch dropdown values from reference table
+                        dropdown_values = self.db_service.get_dropdown_values(
+                            config['ref_schema'],
+                            config['ref_table'],
+                            config['ref_column_key'],
+                            config['ref_column_desc']
+                        )
+                        print(f"DEBUG: Fetched dropdown values for {schema}.{table_name}.{col_name}: {dropdown_values}")
+                        
+                        # Apply to grid
+                        self.data_grid.set_column_dropdown(col_idx, dropdown_values)
+                        print(f"DEBUG: Applied dropdown to {schema}.{table_name}.{col_name}")
+                        
+                    except Exception as e:
+                        print(f"DEBUG: Failed to apply dropdown: {e}")
 
     def closeEvent(self, event) -> None:
         """Handle window close - prompt for unsaved changes."""
