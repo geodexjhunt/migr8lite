@@ -3,7 +3,7 @@
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 import pyodbc
-from app.config import Config
+from config import Config
 
 class DatabaseConnectionError(Exception):
     pass
@@ -63,6 +63,24 @@ class DatabaseService:
             cursor.execute(query, params or ())
             columns = [desc[0] for desc in cursor.description]
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    def get_schemas_info(self) -> List[Dict]:
+        query = "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA"
+        return self.execute_query(query)
+
+    def get_user_defined_schemas_info(self) -> List[Dict]:
+        query = "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME NOT IN ('INFORMATION_SCHEMA', 'sys') AND SCHEMA_NAME NOT LIKE 'db[_]%'"
+        return self.execute_query(query)
+
+    def get_all_tables_info_for_schemas(self, schemas: List[str]) -> List[Dict]:
+        query = "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA IN ({})".format(
+            ",".join("?" for _ in schemas)
+        )
+        return self.execute_query(query, tuple(schemas))
+
+    def get_tables_info(self, schema: str) -> List[Dict]:
+        query = "SELECT TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?"
+        return self.execute_query(query, (schema,))
     
     def get_columns_info(self, schema: str, table: str) -> List[Dict]:
         query = "SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?"

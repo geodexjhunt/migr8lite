@@ -2,10 +2,10 @@
 
 from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTabWidget, QMessageBox
 from PyQt6.QtGui import QFont
-from app.config import Config
-from app.services.db_service import DatabaseService
-from app.models.migration_state import JobStateManager
-from app.ui.dynamic_grid import DynamicGrid
+from config import Config
+from services.db_service import DatabaseService
+from models.migration_state import JobStateManager
+from ui.dynamic_grid import DynamicGrid
 
 class MainWindow(QMainWindow):
     def __init__(self, config: Config):
@@ -13,13 +13,29 @@ class MainWindow(QMainWindow):
         self.config = config
         self.db_service = DatabaseService(config)
         self.job_state = JobStateManager()
-        
+       
         app_config = config.app_config
         self.setWindowTitle(app_config.get("title", "migr8lite"))
         self.setGeometry(100, 100, app_config.get("window_width", 1400), app_config.get("window_height", 900))
         self._setup_ui()
         self._connect_database()
-    
+
+        self.user_defined_schemas = []
+        self.all_tables_info = []
+
+        self._update_database_info_cache()
+
+    def _update_database_info_cache(self) -> None:
+        if self.db_service._connection:
+            self.user_defined_schemas = self.db_service.get_user_defined_schemas_info()
+            self.all_tables_info = self.db_service.get_all_tables_info_for_schemas(
+                [schema["SCHEMA_NAME"] for schema in self.user_defined_schemas]
+            )
+        else:
+            self.status_label.setText("Unable to update local cache of migration db schema")
+            self.user_defined_schemas = []
+            self.all_tables_info = []
+
     def _setup_ui(self) -> None:
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -80,3 +96,4 @@ class MainWindow(QMainWindow):
         except:
             pass
         event.accept()
+
