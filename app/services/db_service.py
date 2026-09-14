@@ -83,5 +83,10 @@ class DatabaseService:
         return self.execute_query(query, (schema,))
     
     def get_columns_info(self, schema: str, table: str) -> List[Dict]:
-        query = "SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?"
+        query = """
+                SELECT COLUMN_NAME, DATA_TYPE 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+                ORDER BY ORDINAL_POSITION
+                """
         return self.execute_query(query, (schema, table))

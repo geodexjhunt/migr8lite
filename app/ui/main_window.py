@@ -1,6 +1,6 @@
 """Main application window."""
 
-from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTabWidget, QMessageBox, QListWidget, QListWidgetItem, QSplitter
+from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTabWidget, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QTreeWidget, QTreeWidgetItem
 from PyQt6.QtGui import QFont
 from PyQt6.QtCore import Qt
 from app.config import Config
@@ -77,13 +77,16 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout()
         
         # Title
-        layout.addWidget(QLabel("Available Tables & Views"))
+        title_label = QLabel("Available Tables & Views")
+        title_label.setFixedHeight(30)
+        layout.addWidget(title_label)
         
         # Splitter for list and grid
         splitter = QSplitter(Qt.Orientation.Horizontal)
         
         # Table list widget (left panel)
-        self.table_list = QListWidget()
+        self.table_list = QTreeWidget()
+        self.table_list.setHeaderLabel("Schemas")
         self.table_list.itemClicked.connect(self._on_table_selected)
         splitter.addWidget(self.table_list)
         
@@ -95,39 +98,60 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 2)
         
-        layout.addWidget(splitter)
+        layout.addWidget(splitter, 1)
         widget.setLayout(layout)
         return widget
     
     def _populate_table_list(self) -> None:
-        """Populate the table list widget with all available tables."""
+        """Populate the tree with schemas as parent nodes and tables as children."""
         self.table_list.clear()
+        
+        # Group tables by schema
+        schemas_dict = {}
         for table_info in self.all_tables_info:
             schema = table_info['TABLE_SCHEMA']
-            table_name = table_info['TABLE_NAME']
-            table_type = table_info['TABLE_TYPE']
-            
-            # Display as "schema.table (TYPE)"
-            display_name = f"{schema}.{table_name} ({table_type})"
-            item = QListWidgetItem(display_name)
-            # Store full table info in item data for later retrieval
-            item.setData(Qt.ItemDataRole.UserRole, table_info)
-            self.table_list.addItem(item)
+            if schema not in schemas_dict:
+                schemas_dict[schema] = []
+            schemas_dict[schema].append(table_info)
         
-        self.status_label.setText(f"Loaded {len(self.all_tables_info)} tables from database")
+        # Create tree structure
+        for schema in sorted(schemas_dict.keys()):
+            schema_item = QTreeWidgetItem([schema])
+            
+            for table_info in sorted(schemas_dict[schema], key=lambda x: x['TABLE_NAME']):
+                table_name = table_info['TABLE_NAME']
+                table_type = table_info['TABLE_TYPE']
+                display_name = f"{table_name}" ## i've removed table type from here as not useful
+                
+                table_item = QTreeWidgetItem([display_name])
+                table_item.setData(0, Qt.ItemDataRole.UserRole, table_info)
+                schema_item.addChild(table_item)
+            
+            self.table_list.addTopLevelItem(schema_item)
+        
+        self.status_label.setText(f"Loaded {len(self.all_tables_info)} tables from {len(schemas_dict)} schemas")
     
-    def _on_table_selected(self, item: QListWidgetItem) -> None:
+    def _on_table_selected(self, item: QTreeWidgetItem) -> None:
         """Handle table selection from list."""
         try:
             table_info = item.data(Qt.ItemDataRole.UserRole)
+
+            # Only process if it's a table item (has table_info), not a schema node
+            if table_info is None:
+                return
+
             schema = table_info['TABLE_SCHEMA']
             table_name = table_info['TABLE_NAME']
             
             # Get column information
             columns = self.db_service.get_columns_info(schema, table_name)
+
+            # Build and execute SELECT query
+            qualified_table = f"{schema}.{table_name}"
+            query = f"SELECT * FROM {qualified_table}"
+            rows = self.db_service.execute_query(query)
             
-            # Load columns into grid (empty rows for now)
-            rows = []
+            # Load columns into grid
             self.data_grid.load_data(columns, rows, editable=False)
             
             self.status_label.setText(f"Selected: {schema}.{table_name} - {len(columns)} columns")
