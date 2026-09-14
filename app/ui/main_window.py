@@ -1,11 +1,12 @@
 """Main application window."""
 
-from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTabWidget, QMessageBox
+from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTabWidget, QMessageBox, QListWidget, QListWidgetItem, QSplitter
 from PyQt6.QtGui import QFont
-from config import Config
-from services.db_service import DatabaseService
-from models.migration_state import JobStateManager
-from ui.dynamic_grid import DynamicGrid
+from PyQt6.QtCore import Qt
+from app.config import Config
+from app.services.db_service import DatabaseService
+from app.models.migration_state import JobStateManager
+from app.ui.dynamic_grid import DynamicGrid
 
 class MainWindow(QMainWindow):
     def __init__(self, config: Config):
@@ -31,6 +32,7 @@ class MainWindow(QMainWindow):
             self.all_tables_info = self.db_service.get_all_tables_info_for_schemas(
                 [schema["SCHEMA_NAME"] for schema in self.user_defined_schemas]
             )
+            self._populate_table_list()
         else:
             self.status_label.setText("Unable to update local cache of migration db schema")
             self.user_defined_schemas = []
@@ -73,11 +75,65 @@ class MainWindow(QMainWindow):
     def _create_data_explorer(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout()
+        
+        # Title
         layout.addWidget(QLabel("Available Tables & Views"))
+        
+        # Splitter for list and grid
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        
+        # Table list widget (left panel)
+        self.table_list = QListWidget()
+        self.table_list.itemClicked.connect(self._on_table_selected)
+        splitter.addWidget(self.table_list)
+        
+        # Dynamic grid (right panel for columns/data)
         self.data_grid = DynamicGrid()
-        layout.addWidget(self.data_grid)
+        splitter.addWidget(self.data_grid)
+        
+        # Set reasonable split sizes
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+        
+        layout.addWidget(splitter)
         widget.setLayout(layout)
         return widget
+    
+    def _populate_table_list(self) -> None:
+        """Populate the table list widget with all available tables."""
+        self.table_list.clear()
+        for table_info in self.all_tables_info:
+            schema = table_info['TABLE_SCHEMA']
+            table_name = table_info['TABLE_NAME']
+            table_type = table_info['TABLE_TYPE']
+            
+            # Display as "schema.table (TYPE)"
+            display_name = f"{schema}.{table_name} ({table_type})"
+            item = QListWidgetItem(display_name)
+            # Store full table info in item data for later retrieval
+            item.setData(Qt.ItemDataRole.UserRole, table_info)
+            self.table_list.addItem(item)
+        
+        self.status_label.setText(f"Loaded {len(self.all_tables_info)} tables from database")
+    
+    def _on_table_selected(self, item: QListWidgetItem) -> None:
+        """Handle table selection from list."""
+        try:
+            table_info = item.data(Qt.ItemDataRole.UserRole)
+            schema = table_info['TABLE_SCHEMA']
+            table_name = table_info['TABLE_NAME']
+            
+            # Get column information
+            columns = self.db_service.get_columns_info(schema, table_name)
+            
+            # Load columns into grid (empty rows for now)
+            rows = []
+            self.data_grid.load_data(columns, rows, editable=False)
+            
+            self.status_label.setText(f"Selected: {schema}.{table_name} - {len(columns)} columns")
+        except Exception as e:
+            QMessageBox.critical(self, "Error Loading Table", f"Failed to load table structure: {e}")
+            self.status_label.setText("Error loading table")
     
     def _connect_database(self) -> None:
         try:

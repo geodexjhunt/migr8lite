@@ -13,8 +13,16 @@ class DynamicGrid(QTableWidget):
         self.horizontalHeader().setStretchLastSection(True)
     
     def load_data(self, columns: List[Dict], rows: List[Dict], editable: bool = True) -> None:
+        """Load data into grid based on schema and rows.
+        
+        Args:
+            columns: List of column metadata dicts with COLUMN_NAME, DATA_TYPE, etc.
+            rows: List of data row dicts
+            editable: Whether grid cells are editable
+        """
         self.row_data = rows
         self.column_metadata = {col['COLUMN_NAME']: col for col in columns}
+        
         column_names = [col['COLUMN_NAME'] for col in columns]
         self.setColumnCount(len(column_names))
         self.setHorizontalHeaderLabels(column_names)
@@ -27,8 +35,11 @@ class DynamicGrid(QTableWidget):
                 if not editable or col_name.lower() in ["id", "created_at", "updated_at"]:
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.setItem(row_idx, col_idx, item)
+        
+        self.resizeColumnsToContents()
     
     def get_all_rows(self) -> List[Dict[str, Any]]:
+        """Get all rows as list of dictionaries."""
         rows = []
         for row_idx in range(self.rowCount()):
             row_dict = {}
