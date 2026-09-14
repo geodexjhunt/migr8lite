@@ -1,0 +1,20 @@
+# Database Configuration
+database:
+  server: localhost
+  database: migr8
+  trusted_connection: true
+  # For SQL authentication, use:
+  # username: your_username
+  # password: your_password
+
+# Application Settings
+app:
+  title: "migr8lite - Migration System"
+  window_width: 1400
+  window_height: 900
+  theme: "light"
+
+# Logging
+logging:
+  level: INFO
+  file: migr8lite.log
