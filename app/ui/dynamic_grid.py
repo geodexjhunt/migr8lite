@@ -9,8 +9,13 @@ class DynamicGrid(QTableWidget):
         super().__init__(parent)
         self.column_metadata: Dict[str, Dict] = {}
         self.row_data: List[Dict[str, Any]] = []
+        self.original_row_data: List[Dict[str, Any]] = []  # Track original state
+        self.dirty_rows: set = set()  # Track which rows have been modified
         self.setAlternatingRowColors(True)
         self.horizontalHeader().setStretchLastSection(True)
+
+        # Connect cell change signal
+        self.itemChanged.connect(self._on_cell_changed)
     
     def load_data(self, columns: List[Dict], rows: List[Dict], editable: bool = True) -> None:
         """Load data into grid based on schema and rows.
@@ -37,7 +42,42 @@ class DynamicGrid(QTableWidget):
                 self.setItem(row_idx, col_idx, item)
         
         self.resizeColumnsToContents()
-    
+    def _on_cell_changed(self, item) -> None:
+        """Track when cells are modified."""
+        if item is not None:
+            row = item.row()
+            self.dirty_rows.add(row)
+
+    def get_dirty_rows(self) -> Dict[int, Dict[str, Any]]:
+        """Return only rows that have been modified with their current values."""
+        dirty = {}
+        for row_idx in self.dirty_rows:
+            dirty[row_idx] = self.get_row_data(row_idx)
+        return dirty
+
+    def get_row_data(self, row_idx: int) -> Dict[str, Any]:
+        """Get current data for a specific row."""
+        row_dict = {}
+        for col_idx in range(self.columnCount()):
+            col_name = self.horizontalHeaderItem(col_idx).text()
+            item = self.item(row_idx, col_idx)
+            row_dict[col_name] = item.text() if item else None
+        return row_dict
+
+    def get_original_row_data(self, row_idx: int) -> Dict[str, Any]:
+        """Get original data for a specific row (before edits)."""
+        if row_idx < len(self.original_row_data):
+            return self.original_row_data[row_idx].copy()
+        return {}
+
+    def is_row_dirty(self, row_idx: int) -> bool:
+        """Check if a specific row has been modified."""
+        return row_idx in self.dirty_rows
+
+    def clear_dirty_flag(self, row_idx: int) -> None:
+        """Clear dirty flag after successful save."""
+        self.dirty_rows.discard(row_idx)
+
     def get_all_rows(self) -> List[Dict[str, Any]]:
         """Get all rows as list of dictionaries."""
         rows = []

@@ -90,3 +90,31 @@ class DatabaseService:
                 ORDER BY ORDINAL_POSITION
                 """
         return self.execute_query(query, (schema, table))
+
+    def get_table_primary_keys(self, schema: str, table: str) -> List[str]:
+        """Get primary key column names for a table."""
+        query = """
+        SELECT COLUMN_NAME 
+        FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE 
+        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND CONSTRAINT_NAME LIKE 'PK%'
+        ORDER BY ORDINAL_POSITION
+        """
+        results = self.execute_query(query, (schema, table))
+        return [r['COLUMN_NAME'] for r in results]
+
+    def update_row(self, schema: str, table: str, primary_keys: Dict[str, Any], 
+                updated_values: Dict[str, Any]) -> bool:
+        """Update a single row using primary keys as WHERE clause."""
+        # Build SET clause
+        set_clause = ", ".join([f"{col} = ?" for col in updated_values.keys()])
+        
+        # Build WHERE clause from primary keys
+        where_clause = " AND ".join([f"{col} = ?" for col in primary_keys.keys()])
+        
+        query = f"UPDATE {schema}.{table} SET {set_clause} WHERE {where_clause}"
+        params = tuple(updated_values.values()) + tuple(primary_keys.values())
+        
+        # Execute with error handling
+        with self.get_cursor() as cursor:
+            cursor.execute(query, params)
+        return True

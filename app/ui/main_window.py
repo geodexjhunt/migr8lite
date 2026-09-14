@@ -23,6 +23,7 @@ class MainWindow(QMainWindow):
 
         self.user_defined_schemas = []
         self.all_tables_info = []
+        self.current_table_primary_keys = []
 
         self._update_database_info_cache()
 
@@ -92,6 +93,7 @@ class MainWindow(QMainWindow):
         
         # Dynamic grid (right panel for columns/data)
         self.data_grid = DynamicGrid()
+        self.data_grid.itemSelectionChanged.connect(self._on_grid_row_changed) 
         splitter.addWidget(self.data_grid)
         
         # Set reasonable split sizes
@@ -101,7 +103,49 @@ class MainWindow(QMainWindow):
         layout.addWidget(splitter, 1)
         widget.setLayout(layout)
         return widget
-    
+    def _on_grid_row_changed(self) -> None:
+        """Handle row selection change in grid - save previous row if dirty."""
+        current_row = self.data_grid.currentRow()
+        
+        # Find which row was previously selected
+        if not hasattr(self, '_last_grid_row'):
+            self._last_grid_row = None
+        
+        if self._last_grid_row is not None and self._last_grid_row != current_row:
+            self._save_grid_row(self._last_grid_row)
+        
+        self._last_grid_row = current_row
+
+    def _save_grid_row(self, row_idx: int) -> None:
+        """Save a single row if it has been modified."""
+        if not self.data_grid.is_row_dirty(row_idx):
+            return
+        
+        if not hasattr(self, 'current_table_primary_keys') or not self.current_table_primary_keys:
+            QMessageBox.warning(self, "Cannot Save", "No primary key found for this table")
+            return
+        
+        try:
+            schema = self._current_table_schema
+            table_name = self._current_table_name
+            
+            # Get original PK values
+            original_row = self.data_grid.get_original_row_data(row_idx)
+            current_row = self.data_grid.get_row_data(row_idx)
+            
+            # Build PK dict from original values (in case user modified PK)
+            pk_dict = {pk: original_row.get(pk) for pk in self.current_table_primary_keys}
+            
+            # Update database
+            self.db_service.update_row(schema, table_name, pk_dict, current_row)
+            
+            # Clear dirty flag
+            self.data_grid.clear_dirty_flag(row_idx)
+            self.status_label.setText(f"Saved row {row_idx + 1}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", f"Failed to save row: {e}")
+
     def _populate_table_list(self) -> None:
         """Populate the tree with schemas as parent nodes and tables as children."""
         self.table_list.clear()
@@ -142,6 +186,9 @@ class MainWindow(QMainWindow):
 
             schema = table_info['TABLE_SCHEMA']
             table_name = table_info['TABLE_NAME']
+
+            #get pk information
+            self.current_table_primary_keys = self.db_service.get_table_primary_keys(schema, table_name)
             
             # Get column information
             columns = self.db_service.get_columns_info(schema, table_name)
@@ -160,13 +207,42 @@ class MainWindow(QMainWindow):
                 rows = []
                 
             # Load columns into grid
-            self.data_grid.load_data(columns, rows, editable=False)
+            self.data_grid.load_data(columns, rows, editable=True)
             
             row_count = len(rows) if rows else 0
             self.status_label.setText(f"Selected: {qualified_table} - {len(columns)} columns, {row_count} rows")
         except Exception as e:
             QMessageBox.critical(self, "Error Loading Table", f"Failed to load table data: {e}")
             self.status_label.setText("Error loading table")
+
+    def closeEvent(self, event) -> None:
+        """Handle window close - prompt for unsaved changes."""
+        if self._has_unsaved_changes():
+            reply = QMessageBox.question(
+                self, "Unsaved Changes",
+                "You have unsaved changes. Save before closing?",
+                QMessageBox.StandardButton.Save | 
+                QMessageBox.StandardButton.Discard | 
+                QMessageBox.StandardButton.Cancel
+            )
+            
+            if reply == QMessageBox.StandardButton.Save:
+                # Save all dirty rows
+                for row_idx in list(self.data_grid.dirty_rows):
+                    self._save_grid_row(row_idx)
+            elif reply == QMessageBox.StandardButton.Cancel:
+                event.ignore()
+                return
+        
+        try:
+            self.db_service.disconnect()
+        except:
+            pass
+        event.accept()
+
+    def _has_unsaved_changes(self) -> bool:
+        """Check if grid has dirty rows."""
+        return len(self.data_grid.dirty_rows) > 0
     
     def _connect_database(self) -> None:
         try:
