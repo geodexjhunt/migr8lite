@@ -1,13 +1,18 @@
 """Main application window."""
 
-from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTabWidget, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QTreeWidget, QTreeWidgetItem
-from PyQt6.QtGui import QFont
+from PyQt6.QtWidgets import QDialog, QComboBox,QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTabWidget, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QTreeWidget, QTreeWidgetItem
+from PyQt6.QtGui import QIcon, QFont
 from PyQt6.QtCore import Qt
 from config.config import Config
 from app.services.db_service import DatabaseService
 from app.models.migration_state import JobStateManager
-from app.ui.dynamic_grid import DynamicGrid
+from app.ui.tabs.data_explorer_tab import DynamicGrid
 from config.dropdown_config import DROPDOWN_LOOKUPS
+from app.models.migration_context import MigrationContext
+from app.ui.task_edit_dialog import TaskEditDialog
+from app.models.workflow_tab_registry import WORKFLOW_TABS, WorkflowPhase
+from app.ui.tabs.data_explorer_tab import DataExplorerTab
+
 
 class MainWindow(QMainWindow):
     def __init__(self, config: Config):
@@ -17,322 +22,323 @@ class MainWindow(QMainWindow):
         self.job_state = JobStateManager()
        
         app_config = config.app_config
-        self.setWindowTitle(app_config.get("title", "migr8lite"))
-        self.setGeometry(100, 100, app_config.get("window_width", 1400), app_config.get("window_height", 900))
-        self._setup_ui()
+        # Create shared context first - tabs will need it during construction
+        self.context = MigrationContext(self)
+
         self._connect_database()
-
-        self.user_defined_schemas = []
-        self.all_tables_info = []
-        self.current_table_primary_keys = []
-        self._current_table_schema = None
-        self._current_table_name = None
-
         self._update_database_info_cache()
 
+        self.setWindowTitle(app_config.get("title", "migr8lite"))
+        self.icon = QIcon(app_config.get("window_icon", None))
+        self.setWindowIcon(self.icon)
+        self.setGeometry(100, 100, app_config.get("window_width", 1400), app_config.get("window_height", 900))
+
+        self._setup_ui()
+
+
+
     def _update_database_info_cache(self) -> None:
-        if self.db_service._connection:
-            self.user_defined_schemas = self.db_service.get_user_defined_schemas_info()
-            self.all_tables_info = self.db_service.get_all_tables_info_for_schemas(
-                [schema["SCHEMA_NAME"] for schema in self.user_defined_schemas]
+        if not self.db_service._connection:
+            self.context.set_database_metadata([], [])
+            #self.status_label.setText(
+            #     "Unable to update local cache of migration DB schema"
+            # )
+            return
+
+        user_defined_schemas = (
+            self.db_service.get_user_defined_schemas_info()
+        )
+
+        all_tables_info = (
+            self.db_service.get_all_tables_info_for_schemas(
+                [
+                    schema["SCHEMA_NAME"]
+                    for schema in user_defined_schemas
+                ]
             )
-            self._populate_table_list()
-        else:
-            self.status_label.setText("Unable to update local cache of migration db schema")
-            self.user_defined_schemas = []
-            self.all_tables_info = []
+        )
+
+        self.context.set_database_metadata(
+            user_defined_schemas,
+            all_tables_info,
+        )
+
+
+
 
     def _setup_ui(self) -> None:
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout()
-        
+
+        main_layout = QVBoxLayout(central_widget)
+
         title_label = QLabel("migr8lite - Migration Management System")
         title_font = QFont()
         title_font.setPointSize(14)
         title_font.setBold(True)
         title_label.setFont(title_font)
         main_layout.addWidget(title_label)
-        
-        self.tab_widget = QTabWidget()
-        self.tab_widget.addTab(self._create_workflow_panel(), "Workflow")
-        self.tab_widget.addTab(self._create_data_explorer(), "Data Explorer")
-        main_layout.addWidget(self.tab_widget)
-        
+
+        # Persistent task toolbar
+        task_layout = QHBoxLayout()
+        task_layout.addWidget(QLabel("Migration Task:"))
+
+        self.migration_task_combo = QComboBox()
+        self.migration_task_combo.currentIndexChanged.connect(
+            self._on_migration_task_changed
+        )
+        task_layout.addWidget(self.migration_task_combo, 1)
+
+        self.btn_new_task = QPushButton("New")
+        self.btn_edit_task = QPushButton("Edit")
+        self.btn_delete_task = QPushButton("Delete")
+
+        self.btn_new_task.clicked.connect(self._on_new_task)
+        self.btn_edit_task.clicked.connect(self._on_edit_task)
+        self.btn_delete_task.clicked.connect(self._on_delete_task)
+
+        task_layout.addWidget(self.btn_new_task)
+        task_layout.addWidget(self.btn_edit_task)
+        task_layout.addWidget(self.btn_delete_task)
+
+        main_layout.addLayout(task_layout)
+
         self.status_label = QLabel("Ready")
+
+        # Main content area
+        content_splitter = QSplitter(Qt.Orientation.Horizontal)
+
+
+        self.task_table_panel = self._create_task_table_panel()
+        content_splitter.addWidget(self.task_table_panel)
+
+        self.workflow_tabs = self._create_workflow_tabs()
+        content_splitter.addWidget(self.workflow_tabs)
+
+        content_splitter.setStretchFactor(0, 0)
+        content_splitter.setStretchFactor(1, 1)
+        content_splitter.setSizes([240, 1000])
+
+        main_layout.addWidget(content_splitter, 1)
+        
         main_layout.addWidget(self.status_label)
-        central_widget.setLayout(main_layout)
-    
-    def _create_workflow_panel(self) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout()
-        label = QLabel("Workflow Panel (Coming Soon)")
-        layout.addWidget(label)
-        for phase_label, phase_id in [("Define Migration", "a_define"), ("Import Files", "b_import")]:
-            btn = QPushButton(phase_label)
-            btn.clicked.connect(lambda checked, pid=phase_id: self._on_phase_clicked(pid))
-            layout.addWidget(btn)
-        layout.addStretch()
-        widget.setLayout(layout)
-        return widget
-    
-    def _create_data_explorer(self) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout()
-        
-        # Title
-        title_label = QLabel("Available Tables & Views")
-        title_label.setFixedHeight(30)
-        layout.addWidget(title_label)
-        
-        # Splitter for list and grid
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        
-        # Table list widget (left panel)
-        self.table_list = QTreeWidget()
-        self.table_list.setHeaderLabel("Schemas")
-        self.table_list.itemClicked.connect(self._on_table_selected)
-        splitter.addWidget(self.table_list)
-        
-        # Dynamic grid (right panel for columns/data)
-        self.data_grid = DynamicGrid()
-        self.data_grid.itemSelectionChanged.connect(self._on_grid_row_changed) 
-        self.data_grid.rowLostFocus.connect(self._on_grid_lost_focus) 
-        splitter.addWidget(self.data_grid)
-        
-        # Set reasonable split sizes
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 2)
-        
-        layout.addWidget(splitter, 1)
-        widget.setLayout(layout)
-        return widget
-    
-    def _on_grid_lost_focus(self, row_idx: int) -> None:
-        """Save row when grid loses focus."""
-        if self.data_grid.is_row_dirty(row_idx):
-            self._save_grid_row(row_idx)
 
-    def _on_grid_row_changed(self) -> None:
-        """Handle row selection change in grid - save previous row if dirty."""
-        current_row = self.data_grid.currentRow()
-        
-        # Find which row was previously selected
-        if not hasattr(self, '_last_grid_row'):
-            self._last_grid_row = None
-        
-        if self._last_grid_row is not None and self._last_grid_row != current_row:
-            self._save_grid_row(self._last_grid_row)
-        
-        self._last_grid_row = current_row
+        self._refresh_task_list()
+        self._refresh_task_table_panel(self.migration_task_combo.currentData())
 
-    def _save_grid_row(self, row_idx: int) -> None:
-        """Save a single row if it has been modified."""
-        print(f"DEBUG: _save_grid_row() called for row {row_idx}")
-        
-        if not self.data_grid.is_row_dirty(row_idx):
-            print(f"DEBUG: Row {row_idx} is not dirty, skipping save")
-            return
+    def _create_workflow_tabs(self) -> QTabWidget:
+        """Create workflow tabs from the central workflow-tab registry."""
+        tab_widget = QTabWidget()
 
-        # Get only changed columns
-        changed_columns = self.data_grid.get_changed_columns(row_idx)
+        # Lets MainWindow find a workflow panel later, if required.
+        self.workflow_tab_pages: dict[WorkflowPhase, QWidget] = {}
 
-        # Check if anything actually changed
-        if not changed_columns:
-            print(f"DEBUG: Row {row_idx} marked dirty but no actual changes detected, skipping update")
-            self.data_grid.clear_dirty_flag(row_idx)
-            return
-        
-        if not hasattr(self, 'current_table_primary_keys') or not self.current_table_primary_keys:
-            error_msg = "No primary key found for this table"
-            print(f"DEBUG: ERROR - {error_msg}")
-            QMessageBox.warning(self, "Cannot Save", error_msg)
-            return
-        
+        for tab_definition in WORKFLOW_TABS:
+            if not tab_definition.enabled:
+                continue
+
+            tab_page = tab_definition.factory(self.context)
+            tab_widget.addTab(tab_page, tab_definition.label)
+
+            if tab_definition.phase is not None:
+                self.workflow_tab_pages[tab_definition.phase] = tab_page
+
+        # Data Explorer is deliberately last and remains a utility tab rather
+        # than a task-scoped workflow phase.
+        self.data_explorer_tab = DataExplorerTab(db_service=self.db_service, context=self.context)
+
+        self.data_explorer_tab.status_changed.connect(self.status_label.setText)
+
+        tab_widget.addTab(self.data_explorer_tab, "Data Explorer")
+
+        return tab_widget
+
+     
+
+
+    def _create_task_table_panel(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel) 
+
+        layout.addWidget(QLabel("Objects in Current Task"))
+
+        self.task_table_tree = QTreeWidget()
+        self.task_table_tree.setHeaderLabel("File & Object >> Table")
+        self.task_table_tree.itemClicked.connect(
+            self._on_task_table_selected
+        )
+
+        layout.addWidget(self.task_table_tree)
+
+        return panel   
+
+    def _refresh_task_table_panel(self, task_id: int) -> None:
+        """Refresh the task table panel to show tables for the given task."""
         try:
-            schema = self._current_table_schema
-            table_name = self._current_table_name
-            
-            print(f"DEBUG: Saving row {row_idx} from {schema}.{table_name}")
-            
-            # Get original PK values
-            original_row = self.data_grid.get_original_row_data(row_idx)
-            
-            print(f"DEBUG: Original row: {original_row}")
-            print(f"DEBUG: Changed columns: {changed_columns}")
-            
-            # Build PK dict from original values (in case user modified PK)
-            pk_dict = {pk: original_row.get(pk) for pk in self.current_table_primary_keys}
-            print(f"DEBUG: Primary keys for WHERE clause: {pk_dict}")
-            
-            # Update database
-            print(f"DEBUG: Calling db_service.update_row()")
-            result = self.db_service.update_row(schema, table_name, pk_dict, changed_columns)
-            print(f"DEBUG: update_row() returned: {result}")
-            
-            # Clear dirty flag
-            self.data_grid.clear_dirty_flag(row_idx)
-            self.status_label.setText(f"Saved row {row_idx + 1} ({len(changed_columns)} column(s) updated)")
-            print(f"DEBUG: Row {row_idx} saved successfully")
-            
+            tables = self.db_service.get_datafileobjects_for_task(task_id)
+            all_tables_info = self.context.all_tables_info  # renamed - don't shadow
+            self.task_table_tree.clear()
+
+            # Group by distinct filename
+            filename_dict: dict[str, list] = {}
+            for row in tables:
+                filename = row['filename']
+                filename_dict.setdefault(filename, []).append(row)
+
+            # Create tree structure
+            for filename in sorted(filename_dict.keys()):
+                file_item = QTreeWidgetItem([filename])
+
+                for table in sorted(
+                    filename_dict[filename],
+                    key=lambda x: x['stagingtablename']
+                ):
+                    # Compare staging table info against actual imported tables
+                    imported = any(
+                        t['TABLE_NAME'] == table['stagingtablename']
+                        and t['TABLE_SCHEMA'] == table['stagingtableschema']
+                        for t in all_tables_info
+                    )
+
+                    item = QTreeWidgetItem(
+                        [f"{table['stagingtablename']} {'✔' if imported else '✖'}"]
+                    )
+                    item.setData(0, Qt.ItemDataRole.UserRole, table)
+                    file_item.addChild(item)
+
+                self.task_table_tree.addTopLevelItem(file_item)
+
+        except Exception as error:
+            print(f"DEBUG: Failed to refresh task table panel: {error}")
+            QMessageBox.critical(self, "Error", f"Failed to refresh task table panel: {error}")
+            self.status_label.setText("Error refreshing task table panel")
+        else:
+            self.status_label.setText("Task table panel refreshed successfully")
+
+    def _on_migration_task_changed(self) -> None:
+        """When migration task changes, notify context."""
+        task_id = self.migration_task_combo.currentData()
+        print(f"DEBUG: Migration task changed to: {task_id}")
+        self.context.set_task(task_id)
+        
+        # Refresh the task table panel to show tables for new task
+        self._refresh_task_table_panel(task_id)
+
+    def _on_task_table_selected(
+        self,
+        item: QTreeWidgetItem,
+        column: int
+    ) -> None:
+        table_info = item.data(0, Qt.ItemDataRole.UserRole)
+
+        if not isinstance(table_info, dict):
+            return
+
+        schema = table_info["stagingtableschema"]
+        table_name = table_info["stagingtablename"]
+
+        self.status_label.setText(
+            f"Selected table: {schema}.{table_name}"
+        )
+
+        # Update shared context - this emits table_changed signal
+        # Any tab connected to context.table_changed will react automatically
+        self.context.set_table(table_info)
+
+    def _on_new_task(self) -> None:
+        """Open dialog to create a new migration task."""
+        dialog = TaskEditDialog(parent=self, task_id=None)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._refresh_task_list()
+            # Optionally auto-select the newly created task
+            new_task_id = dialog.saved_task_id
+            self._select_task_in_combo(new_task_id)
+
+    def _on_edit_task(self) -> None:
+        """Open dialog to edit the currently selected task."""
+        task_id = self.migration_task_combo.currentData()
+        if task_id is None:
+            QMessageBox.warning(self, "No Task Selected", "Please select a task to edit")
+            return
+        
+        dialog = TaskEditDialog(parent=self, task_id=task_id)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._refresh_task_list()
+
+    def _on_delete_task(self) -> None:
+        """Delete the currently selected task after confirmation."""
+        task_id = self.migration_task_combo.currentData()
+        if task_id is None:
+            QMessageBox.warning(self, "No Task Selected", "Please select a task to delete")
+            return
+        
+        task_name = self.migration_task_combo.currentText()
+        reply = QMessageBox.question(
+            self, "Confirm Delete",
+            f"Are you sure you want to delete task '{task_name}'? This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                self.db_service.delete_migration_task(task_id)
+                self._refresh_task_list()
+                self.status_label.setText(f"Deleted task: {task_name}")
+            except Exception as e:
+                QMessageBox.critical(self, "Delete Error", f"Failed to delete task: {e}")
+
+    def _refresh_task_list(self) -> None:
+        """Refresh the migration task list in the combo box."""
+        try:
+            tasks = self.db_service.get_migration_tasks()
+            self.migration_task_combo.clear()
+            for task in tasks:
+                self.migration_task_combo.addItem(task['jobname'], task['jobid'])
         except Exception as e:
-            error_msg = f"Failed to save row: {str(e)}"
-            print(f"DEBUG: EXCEPTION - {error_msg}")
-            print(f"DEBUG: Exception type: {type(e).__name__}")
-            import traceback
-            print(f"DEBUG: Traceback:\n{traceback.format_exc()}")
-            QMessageBox.critical(self, "Save Error", error_msg)
+            QMessageBox.critical(self, "Error", f"Failed to refresh task list: {e}")
 
-    def _populate_table_list(self) -> None:
-        """Populate the tree with schemas as parent nodes and tables as children."""
-        self.table_list.clear()
-        
-        # Group tables by schema
-        schemas_dict = {}
-        for table_info in self.all_tables_info:
-            schema = table_info['TABLE_SCHEMA']
-            if schema not in schemas_dict:
-                schemas_dict[schema] = []
-            schemas_dict[schema].append(table_info)
-        
-        # Create tree structure
-        for schema in sorted(schemas_dict.keys()):
-            schema_item = QTreeWidgetItem([schema])
-            
-            for table_info in sorted(schemas_dict[schema], key=lambda x: x['TABLE_NAME']):
-                table_name = table_info['TABLE_NAME']
-                table_type = table_info['TABLE_TYPE']
-                display_name = f"{table_name}" ## i've removed table type from here as not useful
-                
-                table_item = QTreeWidgetItem([display_name])
-                table_item.setData(0, Qt.ItemDataRole.UserRole, table_info)
-                schema_item.addChild(table_item)
-            
-            self.table_list.addTopLevelItem(schema_item)
-        
-        self.status_label.setText(f"Loaded {len(self.all_tables_info)} tables from {len(schemas_dict)} schemas")
-    
-    def _on_table_selected(self, item: QTreeWidgetItem) -> None:
-        """Handle table selection from list."""
-        try:
-            table_info = item.data(0, Qt.ItemDataRole.UserRole)
-
-            # Only process if it's a table item (has table_info), not a schema node
-            if table_info is None:
-                return
-
-            schema = table_info['TABLE_SCHEMA']
-            table_name = table_info['TABLE_NAME']
-
-            self._current_table_schema = schema
-            self._current_table_name = table_name   
-
-            #get pk information
-            self.current_table_primary_keys = self.db_service.get_table_primary_keys(schema, table_name)
-            
-            # Get column information
-            columns = self.db_service.get_columns_info(schema, table_name)
-
-            if not columns:
-                QMessageBox.warning(self, "No Columns", f"Table {schema}.{table_name} has no columns")
-                return
-
-            # Build and execute SELECT query
-            qualified_table = f"{schema}.{table_name}"
-            query = f"SELECT * FROM {qualified_table}"
-            rows = self.db_service.execute_query(query)
-
-            # Handle empty results gracefully
-            if rows is None:
-                rows = []
-                
-            # Load columns into grid
-            self.data_grid.load_data(columns, rows, editable=True)
-
-            # Apply dropdowns to configured columns
-            self._apply_dropdowns_to_grid(schema, table_name, columns)         
-            
-            row_count = len(rows) if rows else 0
-            self.status_label.setText(f"Selected: {qualified_table} - {len(columns)} columns, {row_count} rows")
-        except Exception as e:
-            QMessageBox.critical(self, "Error Loading Table", f"Failed to load table data: {e}")
-            self.status_label.setText("Error loading table")
-
-    def _apply_dropdowns_to_grid(self, schema: str, table_name: str, columns: list[dict]) -> None:
-        """Apply dropdown lookups to configured columns."""
-
-        # Find matching config for this table
-        for config in DROPDOWN_LOOKUPS:
-            if config['schema'] == schema and config['table'] == table_name:
-                print(f"DEBUG: Found matching dropdown config for {schema}.{table_name}")
-                # Find column index
-                col_name = config['column']
-                col_idx = next((i for i, col in enumerate(columns) 
-                            if col['COLUMN_NAME'] == col_name), None)
-                
-                if col_idx is not None:
-                    print(f"DEBUG: Applying dropdown to column {col_name} at index {col_idx}")
-                    try:
-                        # Fetch dropdown values from reference table
-                        dropdown_values = self.db_service.get_dropdown_values(
-                            config['ref_schema'],
-                            config['ref_table'],
-                            config['ref_column_key'],
-                            config['ref_column_desc']
-                        )
-                        print(f"DEBUG: Fetched dropdown values for {schema}.{table_name}.{col_name}: {dropdown_values}")
-                        
-                        # Apply to grid
-                        self.data_grid.set_column_dropdown(col_idx, dropdown_values)
-                        print(f"DEBUG: Applied dropdown to {schema}.{table_name}.{col_name}")
-                        
-                    except Exception as e:
-                        print(f"DEBUG: Failed to apply dropdown: {e}")
-
-    def closeEvent(self, event) -> None:
-        """Handle window close - prompt for unsaved changes."""
-        if self._has_unsaved_changes():
-            reply = QMessageBox.question(
-                self, "Unsaved Changes",
-                "You have unsaved changes. Save before closing?",
-                QMessageBox.StandardButton.Save | 
-                QMessageBox.StandardButton.Discard | 
-                QMessageBox.StandardButton.Cancel
-            )
-            
-            if reply == QMessageBox.StandardButton.Save:
-                # Save all dirty rows
-                for row_idx in list(self.data_grid.dirty_rows):
-                    self._save_grid_row(row_idx)
-            elif reply == QMessageBox.StandardButton.Cancel:
-                event.ignore()
-                return
-        
-        try:
-            self.db_service.disconnect()
-        except:
-            pass
-        event.accept()
-
-    def _has_unsaved_changes(self) -> bool:
-        """Check if grid has dirty rows."""
-        return len(self.data_grid.dirty_rows) > 0
+    def _select_task_in_combo(self, task_id: int) -> None:
+        """Select a task in the combo box by its ID."""
+        index = self.migration_task_combo.findData(task_id)
+        if index != -1:
+            self.migration_task_combo.setCurrentIndex(index)
     
     def _connect_database(self) -> None:
         try:
             self.db_service.connect()
-            self.status_label.setText("Connected to database")
+            #self.status_label.setText("Connected to database")
         except Exception as e:
             QMessageBox.critical(self, "Database Error", f"Failed to connect: {e}")
-            self.status_label.setText("Disconnected")
+            #self.status_label.setText("Disconnected")
     
-    def _on_phase_clicked(self, phase_id: str) -> None:
-        self.status_label.setText(f"Navigating to: {phase_id}")
-    
+
     def closeEvent(self, event) -> None:
+        """Prompt to save Data Explorer changes before exiting."""
+        if self.data_explorer_tab._has_unsaved_changes():
+            reply = QMessageBox.question(
+                self,
+                "Unsaved Changes",
+                "Save Data Explorer changes before closing?",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+            )
+
+            if reply == QMessageBox.StandardButton.Cancel:
+                event.ignore()
+                return
+
+            if (
+                reply == QMessageBox.StandardButton.Save
+                and not self.data_explorer_tab.save_pending_changes()
+            ):
+                event.ignore()
+                return
+
         try:
             self.db_service.disconnect()
-        except:
-            pass
+        except Exception as error:
+            print(f"DEBUG: Database disconnect failed: {error}")
+
         event.accept()
 

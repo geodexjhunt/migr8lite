@@ -1,6 +1,7 @@
 """Dynamic grid widget for displaying table data."""
 
 from typing import Dict, List, Optional, Any
+from app.models.migration_context import MigrationContext
 from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem,QAbstractItemView,QComboBox
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFocusEvent
@@ -9,8 +10,9 @@ class DynamicGrid(QTableWidget):
     # Add this signal at class level
     rowLostFocus = pyqtSignal(int)  # Emits row index when focus leaves
     
-    def __init__(self, parent=None):
+    def __init__(self, context: MigrationContext, parent=None):
         super().__init__(parent)
+        self.context = context
         self.column_metadata: Dict[str, Dict] = {}
         self.row_data: List[Dict[str, Any]] = []
         self.original_row_data: List[Dict[str, Any]] = []  # Track original state

@@ -12,6 +12,15 @@ class DatabaseService:
     def __init__(self, config: Config):
         self.config = config
         self._connection = None
+
+        ## tables are stored as schema.tablename 
+        ## to be able to wrap them in square brackets we need to insert square brackets around the period
+        ## that logic has been moved to the get function of the config property
+        self.jobtable = config.system_management_config.get("job_table")
+        self.jobfiletable = config.system_management_config.get("jobfile_table")
+        self.datafileobjecttable = config.system_management_config.get("datafileobject_table")
+        self.datafiletable = config.system_management_config.get("datafile_table")
+        self.jobrunversiontable = config.system_management_config.get("jobrunversion_table")
     
     def build_connection_string(self) -> str:
         db_config = self.config.database_config
@@ -60,6 +69,7 @@ class DatabaseService:
     
     def execute_query(self, query: str, params: Optional[tuple] = None) -> List[Dict]:
         with self.get_cursor() as cursor:
+            print(f"DEBUG: Pre-Execute query: {query} with params: {params or ()}")
             cursor.execute(query, params or ())
             columns = [desc[0] for desc in cursor.description]
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
@@ -144,6 +154,91 @@ class DatabaseService:
             
         except Exception as e:
             print(f"DEBUG: update_row() EXCEPTION: {str(e)}")
+            print(f"DEBUG: Exception type: {type(e).__name__}")
+            import traceback
+            print(f"DEBUG: Traceback:\n{traceback.format_exc()}")
+            self._connection.rollback()
+            raise
+
+    def get_migration_tasks(self) -> List[Dict]:
+        """Fetch all migration tasks."""
+        query = f"SELECT * FROM {self.jobtable} Order By jobid Asc"
+        return self.execute_query(query)
+
+    def get_tables_for_task(self, task_id: int) -> List[Dict]:
+        """Fetch all tables associated with a specific migration task."""
+        query = f"""
+        SELECT jf.* FROM {self.jobfiletable} jf 
+        INNER JOIN {self.jobrunversiontable} jrv 
+        ON jf.[jobrunversionid] = jrv.[jobrunversionid] 
+        WHERE jrv.[runversion] = 1 and jrv.[jobid] = ? Order By [jobfileid] Asc
+        """
+        return self.execute_query(query, (task_id,))    
+
+    def get_jobfiles_for_task(self, task_id: int) -> List[Dict]:
+        """Fetch all tables associated with a specific migration task."""
+        query = f"""
+        SELECT jf.* FROM {self.jobfiletable} jf 
+        INNER JOIN {self.jobrunversiontable} jrv 
+        ON jf.[jobrunversionid] = jrv.[jobrunversionid] 
+        WHERE jrv.[runversion] = 1 and jrv.[jobid] = ? Order By [jobfileid] Asc
+        """
+        return self.execute_query(query, (task_id,))    
+
+    def get_datafileobjects_for_task(self, task_id: int) -> List[Dict]:
+        """Fetch all datafile objects associated with a specific migration task."""
+        query = f"""
+        SELECT jf.filename, dfo.* FROM {self.datafileobjecttable} dfo
+        INNER JOIN {self.jobfiletable} jf
+        ON dfo.[datafileid] = jf.[datafileid]
+        INNER JOIN {self.jobrunversiontable} jrv 
+        ON jf.[jobrunversionid] = jrv.[jobrunversionid] 
+        WHERE jrv.[runversion] = 1 and jrv.[jobid] = ?
+        ORDER BY jf.[filename], dfo.[datafileobjectid] Asc
+        """
+        return self.execute_query(query, (task_id,))    
+
+    def save_migration_task(self, task_id: Optional[int], name: str, description: str, schemaname: str, jobprefix: str, status: str, purpose: str) -> int:
+        """Save a migration task. If task_id is None, create a new task; otherwise, update the existing task."""
+        try:
+            cursor = self._connection.cursor()
+            if task_id is None:
+                query = f"INSERT INTO {self.jobtable} ([jobname], [description], [schemaname], [jobprefix], [status], [purpose]) VALUES (?, ?, ?, ?, ?, ?)"
+                cursor.execute(query, (name, description, schemaname, jobprefix, status, purpose))
+                self._connection.commit()
+                new_task_id = cursor.lastrowid
+                cursor.close()
+                return new_task_id
+            else:
+                query = f"""
+                UPDATE {self.jobtable} SET [jobname] = ?, [description] = ?, [schemaname]= ?,
+                [jobprefix] = ?, [status] = ?, [purpose] = ?
+                WHERE [JobId] = ?
+                """
+                cursor.execute(query, (name, description, schemaname, jobprefix, status, purpose, task_id))
+                self._connection.commit()
+                cursor.close()
+                return task_id
+        except Exception as e:
+            print(f"DEBUG: save_migration_task() EXCEPTION: {str(e)}")
+            print(f"DEBUG: Exception type: {type(e).__name__}")
+            import traceback
+            print(f"DEBUG: Traceback:\n{traceback.format_exc()}")
+            self._connection.rollback()
+            raise
+
+    def delete_migration_task(self, task_id: int) -> bool:
+        """Delete a specific migration task by its ID."""
+        query = f"DELETE FROM {self.jobtable} WHERE [JobId] = ?"
+        try:
+            cursor = self._connection.cursor()
+            cursor.execute(query, (task_id,))
+            self._connection.commit()
+            rows_affected = cursor.rowcount
+            cursor.close()
+            return rows_affected > 0
+        except Exception as e:
+            print(f"DEBUG: delete_migration_task() EXCEPTION: {str(e)}")
             print(f"DEBUG: Exception type: {type(e).__name__}")
             import traceback
             print(f"DEBUG: Traceback:\n{traceback.format_exc()}")

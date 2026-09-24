@@ -4,6 +4,12 @@ import yaml
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+SYSTEM_ALIASES = {
+    "BASE TABLE": "Tables",
+    "VIEW": "Views",
+    # Add more aliases as needed
+}
+
 class Config:
     def __init__(self, config_file: Optional[str] = None):
         if config_file is None:
@@ -29,6 +35,30 @@ class Config:
                 return default
         return value if value is not None else default
     
+    @staticmethod
+    def _format_qualified_table_name(value: Any) -> Any:
+        """Format schema.table as [schema].[table] without mutating config."""
+        if not isinstance(value, str):
+            return value
+
+        parts = value.split(".")
+
+        # Only format normal two-part schema.table values.
+        if len(parts) != 2:
+            return value
+
+        schema, table = parts
+        return f"[{schema}].[{table}]"
+
+    def _get_formatted_section(self, section_name: str) -> Dict[str, Any]:
+        """Return a formatted copy of a config section."""
+        section = self.config.get(section_name, {})
+
+        return {
+            key: self._format_qualified_table_name(value)
+            for key, value in section.items()
+        }
+    
     @property
     def database_config(self) -> Dict[str, Any]:
         return self.config.get("database", {})
@@ -40,3 +70,15 @@ class Config:
     @property
     def logging_config(self) -> Dict[str, Any]:
         return self.config.get("logging", {})
+
+    @property
+    def system_schema_config(self) -> Dict[str, Any]:
+        return self._get_formatted_section("systemschema")
+
+    @property
+    def system_management_config(self) -> Dict[str, Any]:
+        return self._get_formatted_section("systemmanagementtables")
+
+    @property
+    def system_reference_config(self) -> Dict[str, Any]:
+        return self._get_formatted_section("systemreferencetables")
