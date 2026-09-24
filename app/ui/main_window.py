@@ -1,7 +1,7 @@
 """Main application window."""
 
 from PyQt6.QtWidgets import QDialog, QComboBox,QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTabWidget, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QTreeWidget, QTreeWidgetItem
-from PyQt6.QtGui import QIcon, QFont
+from PyQt6.QtGui import QIcon, QFont, QAction
 from PyQt6.QtCore import Qt
 from config.config import Config
 from app.services.db_service import DatabaseService
@@ -12,7 +12,7 @@ from app.models.migration_context import MigrationContext
 from app.ui.task_edit_dialog import TaskEditDialog
 from app.models.workflow_tab_registry import WORKFLOW_TABS, WorkflowPhase
 from app.ui.tabs.data_explorer_tab import DataExplorerTab
-
+from app.ui.theme import set_dark_mode
 
 class MainWindow(QMainWindow):
     def __init__(self, config: Config):
@@ -33,7 +33,11 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(self.icon)
         self.setGeometry(100, 100, app_config.get("window_width", 1400), app_config.get("window_height", 900))
 
+        self.dark_mode_enabled = False
+
         self._setup_ui()
+        self._create_view_menu()
+        self._toggle_dark_mode(self.dark_mode_enabled)
 
 
 
@@ -126,6 +130,22 @@ class MainWindow(QMainWindow):
         self._refresh_task_list()
         self._refresh_task_table_panel(self.migration_task_combo.currentData())
 
+
+    
+    def _create_view_menu(self) -> None:
+        """Create view-related menu actions."""
+        view_menu = self.menuBar().addMenu("View")
+
+        self.dark_mode_action = QAction("Dark Mode", self)
+        self.dark_mode_action.setCheckable(True)
+        self.dark_mode_action.setChecked(False)
+
+        self.dark_mode_action.toggled.connect(
+            self._toggle_dark_mode
+        )
+
+        view_menu.addAction(self.dark_mode_action)
+
     def _create_workflow_tabs(self) -> QTabWidget:
         """Create workflow tabs from the central workflow-tab registry."""
         tab_widget = QTabWidget()
@@ -137,7 +157,7 @@ class MainWindow(QMainWindow):
             if not tab_definition.enabled:
                 continue
 
-            tab_page = tab_definition.factory(self.context)
+            tab_page = tab_definition.factory(self.context, self.config, self.db_service)
             tab_widget.addTab(tab_page, tab_definition.label)
 
             if tab_definition.phase is not None:
@@ -310,7 +330,16 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Database Error", f"Failed to connect: {e}")
             #self.status_label.setText("Disconnected")
-    
+
+
+    def _toggle_dark_mode(self, enabled: bool) -> None:
+        """Switch between dark and light application themes."""
+        self.dark_mode_enabled = enabled
+        set_dark_mode(enabled)
+
+        self.dark_mode_action.setText(
+            "Light Mode" if enabled else "Dark Mode"
+        )
 
     def closeEvent(self, event) -> None:
         """Prompt to save Data Explorer changes before exiting."""

@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 from typing import Callable
-
+from app.services.db_service import DatabaseService
+from config.config import Config
 from PyQt6.QtWidgets import QWidget
+
 
 from app.models.migration_context import MigrationContext
 from app.models.system_model import WorkflowPhase
@@ -9,6 +11,7 @@ from app.models.system_model import WorkflowPhase
 # Import real tab classes as you create them.
 # from tabs.import_tab import ImportTab
 from app.ui.tabs.extract_tab import ExtractTab
+from app.ui.tabs.import_tab import ImportTab
 
     
 
@@ -19,7 +22,7 @@ class WorkflowTabDefinition:
 
     phase: WorkflowPhase | None
     label: str
-    factory: Callable[[MigrationContext], QWidget]
+    factory: Callable[[MigrationContext,Config,DatabaseService], QWidget]
     enabled: bool = True
 
 
@@ -29,13 +32,17 @@ class PlaceholderWorkflowTab(QWidget):
     def __init__(
         self,
         context: MigrationContext,
+        config: Config,
+        db_service: DatabaseService,
         title: str,
         parent: QWidget | None = None
     ) -> None:
         super().__init__(parent)
-        self.context = context
-        self.title = title
 
+        self.title = title
+        self.context = context
+        self.config = config
+        self.db_service = db_service
         # This tab can later subscribe to:
         # self.context.task_changed.connect(self._on_task_changed)
         # self.context.table_changed.connect(self._on_table_changed)
@@ -46,8 +53,8 @@ def create_placeholder_tab(
 ) -> Callable[[MigrationContext], QWidget]:
     """Create a factory compatible with WorkflowTabDefinition."""
 
-    def factory(context: MigrationContext) -> QWidget:
-        return PlaceholderWorkflowTab(context, title)
+    def factory(context: MigrationContext, config: Config, db_service: DatabaseService) -> QWidget:
+        return PlaceholderWorkflowTab(context, config, db_service, title)
 
     return factory
 
@@ -56,12 +63,12 @@ WORKFLOW_TABS: list[WorkflowTabDefinition] = [
     WorkflowTabDefinition(
         phase=WorkflowPhase.IMPORT,
         label="Import",
-        factory=create_placeholder_tab("Import"),
+        factory=lambda context, config, db_service: ImportTab(context=context, config=config, db_service=db_service),
     ),
     WorkflowTabDefinition(
         phase=WorkflowPhase.EXTRACT,
         label="Extract",
-        factory=lambda context: ExtractTab(context),
+        factory=lambda context, config, db_service: ExtractTab(context=context, config=config, db_service=  db_service),
     ),
     WorkflowTabDefinition(
         phase=WorkflowPhase.VIEW_SOURCE,

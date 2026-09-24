@@ -52,7 +52,13 @@ class DatabaseService:
         if self._connection:
             self._connection.close()
             self._connection = None
-    
+            
+    def test_connected(self) -> bool:
+        if self._connection:
+            return True
+        else:
+            return False
+
     @contextmanager
     def get_cursor(self):
         if not self._connection:

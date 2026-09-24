@@ -1,12 +1,24 @@
 from multiprocessing import context
-
+from config.config import Config
 from PyQt6.QtWidgets import QWidget
 from app.models.migration_context import MigrationContext
+from app.services.db_service import DatabaseService
 
 class ExtractTab(QWidget):
-    def __init__(self, context: MigrationContext, parent=None):
+
+    def __init__(
+        self,
+        context: MigrationContext, 
+        config: Config,
+        db_service: DatabaseService,
+        parent: QWidget | None = None,
+        
+            ) -> None:
         super().__init__(parent)
+      
         self.context = context
+        self.config = config
+        self.db_service = db_service
 
         self.context.task_changed.connect(self._on_task_changed)
         self.context.table_changed.connect(self._on_table_changed)
