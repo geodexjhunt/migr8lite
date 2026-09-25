@@ -42,9 +42,9 @@ class DataExplorerTab(QWidget):
         self.current_table_primary_keys: list[str] = []
         self._last_grid_row: int | None = None
 
-        self.context.database_metadata_changed.connect(
-            self._on_database_metadata_changed
-        )
+
+        self.db_service.table_cache_changed.connect(self._on_database_metadata_changed)
+
 
         self._setup_ui()
         self._populate_table_list()
@@ -156,8 +156,7 @@ class DataExplorerTab(QWidget):
         """Populate the tree with schemas as parent nodes and tables as children."""
         self.table_list.clear()
 
-        tables = self.context.all_tables_info
-        #schemas = self.context.user_defined_schemas
+        tables = self.db_service.all_tables_info
         
         # Group tables by schema
         schemas_dict = {}

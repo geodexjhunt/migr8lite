@@ -4,14 +4,22 @@ from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 import pyodbc
 from config.config import Config
+from PyQt6.QtCore import pyqtSignal, QObject
 
 class DatabaseConnectionError(Exception):
     pass
 
-class DatabaseService:
+class DatabaseService(QObject):
+    table_cache_changed = pyqtSignal()
+
     def __init__(self, config: Config):
+        super().__init__()
         self.config = config
         self._connection = None
+
+        self._user_defined_schemas: List[Dict] = []
+        self._all_tables_info: List[Dict] = []
+        self._table_lookup: set[tuple[str, str]] = set()
 
         ## tables are stored as schema.tablename 
         ## to be able to wrap them in square brackets we need to insert square brackets around the period
@@ -250,3 +258,40 @@ class DatabaseService:
             print(f"DEBUG: Traceback:\n{traceback.format_exc()}")
             self._connection.rollback()
             raise
+
+    def refresh_table_cache(self) -> None:
+        """Re-query schema/table metadata and refresh the internal cache."""
+        if not self._connection:
+            self._user_defined_schemas = []
+            self._all_tables_info = []
+            self._table_lookup = set()
+            return
+
+        self._user_defined_schemas = self.get_user_defined_schemas_info()
+
+        schema_names = [
+            schema["SCHEMA_NAME"] for schema in self._user_defined_schemas
+        ]
+
+        self._all_tables_info = self.get_all_tables_info_for_schemas(
+            schema_names
+        )
+
+        self._table_lookup = {
+            (row["TABLE_SCHEMA"], row["TABLE_NAME"])
+            for row in self._all_tables_info
+        }
+
+        self.table_cache_changed.emit()
+        
+    def table_exists(self, schema: str, table_name: str) -> bool:
+        """Check whether a table exists, using the cached metadata."""
+        return (schema, table_name) in self._table_lookup
+
+    @property
+    def all_tables_info(self) -> List[Dict]:
+        return self._all_tables_info
+
+    @property
+    def user_defined_schemas(self) -> List[Dict]:
+        return self._user_defined_schemas

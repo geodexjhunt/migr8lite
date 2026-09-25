@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import Callable
-from app.services.db_service import DatabaseService
+
 from config.config import Config
 from PyQt6.QtWidgets import QWidget
 
@@ -8,8 +8,11 @@ from PyQt6.QtWidgets import QWidget
 from app.models.migration_context import MigrationContext
 from app.models.system_model import WorkflowPhase
 
+from app.services.db_service import DatabaseService
+
 # Import real tab classes as you create them.
 # from tabs.import_tab import ImportTab
+
 from app.ui.tabs.extract_tab import ExtractTab
 from app.ui.tabs.import_tab import ImportTab
 
@@ -63,7 +66,8 @@ WORKFLOW_TABS: list[WorkflowTabDefinition] = [
     WorkflowTabDefinition(
         phase=WorkflowPhase.IMPORT,
         label="Import",
-        factory=lambda context, config, db_service: ImportTab(context=context, config=config, db_service=db_service),
+        #factory=lambda context, config, db_service: ImportTab(context=context, config=config, db_service=db_service),
+        factory = ImportTab
     ),
     WorkflowTabDefinition(
         phase=WorkflowPhase.EXTRACT,

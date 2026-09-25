@@ -10,7 +10,7 @@ from app.ui.tabs.data_explorer_tab import DynamicGrid
 from config.dropdown_config import DROPDOWN_LOOKUPS
 from app.models.migration_context import MigrationContext
 from app.ui.task_edit_dialog import TaskEditDialog
-from app.models.workflow_tab_registry import WORKFLOW_TABS, WorkflowPhase
+from app.ui.tabs.workflow_tab_registry import WORKFLOW_TABS, WorkflowPhase
 from app.ui.tabs.data_explorer_tab import DataExplorerTab
 from app.ui.theme import set_dark_mode
 
@@ -20,10 +20,11 @@ class MainWindow(QMainWindow):
         self.config = config
         self.db_service = DatabaseService(config)
         self.job_state = JobStateManager()
-       
         app_config = config.app_config
         # Create shared context first - tabs will need it during construction
         self.context = MigrationContext(self)
+
+        self.db_service.refresh_table_cache()
 
         self._connect_database()
         self._update_database_info_cache()
@@ -42,34 +43,9 @@ class MainWindow(QMainWindow):
 
 
     def _update_database_info_cache(self) -> None:
-        if not self.db_service._connection:
-            self.context.set_database_metadata([], [])
-            #self.status_label.setText(
-            #     "Unable to update local cache of migration DB schema"
-            # )
-            return
-
-        user_defined_schemas = (
-            self.db_service.get_user_defined_schemas_info()
-        )
-
-        all_tables_info = (
-            self.db_service.get_all_tables_info_for_schemas(
-                [
-                    schema["SCHEMA_NAME"]
-                    for schema in user_defined_schemas
-                ]
-            )
-        )
-
-        self.context.set_database_metadata(
-            user_defined_schemas,
-            all_tables_info,
-        )
-
-
-
-
+        if self.db_service._connection:
+            self.db_service.refresh_table_cache()
+   
     def _setup_ui(self) -> None:
         central_widget = QWidget()
         self.setCentralWidget(central_widget)

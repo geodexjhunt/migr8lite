@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (    QApplication,    QFileDialog,    QGridLayout,  
     QHBoxLayout,    QVBoxLayout,    QInputDialog,    QComboBox,    QDialog,    QListWidget,
     QListWidgetItem,    QSizePolicy)
 
+from app.services.import_service import ImportService
 from config.config import Config
 
 
@@ -28,6 +29,13 @@ class ImportTab(QWidget):
         self.context = context
         self.config = config
         self.db_service = db_service
+
+        self.import_service = ImportService(
+            config=self.config,
+            context=self.context,
+            db_service=self.db_service,
+        )
+
 
         self.current_task = self.context.current_task_id
         self.current_table = self.context.current_table
@@ -222,3 +230,44 @@ class ImportTab(QWidget):
         h = frame + (row_h * visible_rows)
         lw.setMaximumHeight(h)
         lw.setMinimumHeight(h)   # fixed-at-content height; remove if you want slight shrink/grow
+
+    def _get_inputs(self):
+        return {
+            "server": self.server_input.text().strip(),
+            "database": self.database_input.text().strip(),
+            "table_prefix": self.table_prefix_input.text().strip(),
+            "date_format": self.date_format_combo.currentText().strip(),
+            "table_schema": self.table_schema_input.text().strip(),
+            "initial_folders": self._get_selected_job_initial_folders(),
+            "task_id": self.current_task,
+        }
+    
+    def _validate_inputs(self, cfg) -> bool:
+        required = ["server", "database", "table_schema"]
+        for key in required:
+            if not cfg[key]:
+                QMessageBox.warning(self, "Missing Input", f"Please enter: {key.replace('_', ' ').title()}")
+                return False
+
+        return True
+
+
+    def _run_import(self):
+        """Collect UI values, validate them, and start an import."""
+        import_config = self._get_inputs()
+
+        if not self._validate_inputs(import_config):
+            return
+
+        try:
+            self.import_service.run_import(import_config)
+
+            self.append_log(
+                f"Running import with configuration: {import_config}"
+            )
+            self.status_changed.emit("Import completed successfully.")
+
+        except Exception as error:
+            self.append_log(f"Import failed: {error}")
+            self.status_changed.emit(f"Import failed: {error}")
+    
