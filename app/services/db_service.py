@@ -1,8 +1,13 @@
 """Database service for MSSQL operations."""
 
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 import pyodbc
+from pathlib import Path
+
+from app.models.system_model import DataFileObject
+from app.models.system_model import DataFileObject
 from config.config import Config
 from PyQt6.QtCore import pyqtSignal, QObject
 
@@ -29,6 +34,7 @@ class DatabaseService(QObject):
         self.datafileobjecttable = config.system_management_config.get("datafileobject_table")
         self.datafiletable = config.system_management_config.get("datafile_table")
         self.jobrunversiontable = config.system_management_config.get("jobrunversion_table")
+        self.jobfolderstable = config.system_management_config.get("jobfolders_table")
     
     def build_connection_string(self) -> str:
         db_config = self.config.database_config
@@ -81,13 +87,35 @@ class DatabaseService(QObject):
         finally:
             cursor.close()
     
-    def execute_query(self, query: str, params: Optional[tuple] = None) -> List[Dict]:
+    def execute_query(self, query: str, params: Optional[tuple] = None, fetchone: bool = False) -> List[Dict]:
         with self.get_cursor() as cursor:
             print(f"DEBUG: Pre-Execute query: {query} with params: {params or ()}")
             cursor.execute(query, params or ())
             columns = [desc[0] for desc in cursor.description]
+            if fetchone:
+                row = cursor.fetchone()
+                return [dict(zip(columns, row))] if row else []
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        
+    def execute_returning_one(self,query: str,params: Optional [tuple] = None) -> dict[str, Any] | None:
+        """Execute a statement with OUTPUT and return one result row."""
+        with self.get_cursor() as cursor:
+            print(f"DEBUG: Pre-Execute DML with OUTPUT : {query} with params: {params or ()}")
+            cursor.execute(query, params or ())
 
+            columns = [description[0] for description in cursor.description]
+            row = cursor.fetchone()
+
+            return dict(zip(columns, row)) if row else None
+
+    def execute_dml(self,query: str,params: Optional[tuple] = None ) -> int:
+        """Execute INSERT, UPDATE, or DELETE and return the affected row count."""
+        with self.get_cursor() as cursor:
+            print(f"DEBUG: Pre-Execute DML: {query} with params: {params or ()}")
+            cursor.execute(query, params or ())
+            return cursor.rowcount       
+        
+    
     def get_schemas_info(self) -> List[Dict]:
         query = "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA"
         return self.execute_query(query)
@@ -288,6 +316,186 @@ class DatabaseService(QObject):
         """Check whether a table exists, using the cached metadata."""
         return (schema, table_name) in self._table_lookup
 
+    def get_max_runversion(self) -> int | None:
+        jobid = self.current_jobid
+        sql = f"""
+        SELECT MAX(runversion)
+        FROM {self.jobrunversiontable}
+        WHERE jobid = ?
+        """
+        row = self.execute_query(sql, (jobid,), fetchone=True)
+        return int(row[0]) if row and row[0] is not None else None
+
+    def resolve_runversion(self, mode: str) -> int:
+        jobid = self.current_jobid
+        max_rv = self.get_max_runversion()
+
+        if mode == "append":
+            if max_rv is None:
+                raise ValueError("Cannot append: no previous run exists for this job.")
+            return max_rv
+
+        # mode == 'new'
+        next_rv = 1 if max_rv is None else max_rv + 1
+        sql = f"""
+        INSERT INTO {self.jobrunversiontable}
+        (jobid, runversion, rundatetime)
+        VALUES (?, ?, ?)
+        """
+        self.execute_dml(sql, (jobid, next_rv, datetime.now()))
+        return next_rv
+   
+    def get_runversionid(self, runversion: int) -> int | None:
+        jobid = self.current_jobid
+
+        sql = f"""
+        SELECT jobrunversionid
+        FROM {self.jobrunversiontable}
+        WHERE jobid = ? AND runversion = ?
+        """
+        row = self.execute_query(sql, (jobid, runversion), fetchone=True)
+        return int(row[0]) if row and row[0] is not None else None
+    
+    def upsert_found_folders(self, jobrunversionid: int, found_folders: list[tuple[str, str]]) -> int:
+        """
+        Insert foldertype='Found' where path does not already exist for same job/run/foldertype.
+        Returns inserted count.
+        """
+        exists_sql = f"""
+        SELECT 1
+        FROM {self.jobfolderstable}
+        WHERE jobrunversionid = ?
+        AND LOWER(foldertype) = 'found'
+        AND LOWER(folderpath) = LOWER(?)
+        """
+        ins_sql = f"""
+        INSERT INTO {self.jobfolderstable}
+        (jobrunversionid, foldertype, foldername, folderpath)
+        VALUES (?, 'Found', ?, ?)
+        """
+
+        inserted = 0
+        for foldername, folderpath in found_folders:
+            exists = self.execute_query(exists_sql, (jobrunversionid, folderpath), fetchone=True)
+            if exists:
+                continue
+            self.execute_dml(ins_sql, (jobrunversionid, foldername, folderpath))
+            inserted += 1
+        return inserted
+
+    def get_found_folderid_map(self, jobrunversionid: int) -> dict[str, int]:
+
+        sql = f"""
+        SELECT folderid, folderpath
+        FROM {self.jobfolderstable}
+        WHERE jobrunversionid = ?
+        AND LOWER(foldertype) = 'found'
+        """
+        rows =self.execute_query(sql, (jobrunversionid,), fetchone=False)
+        #return {str(r.folderpath).lower(): int(r.folderid) for r in rows if r.folderpath}
+        return {normalize_path_key(r.folderpath): int(r.folderid) for r in rows if r.folderpath}
+
+    def get_initial_folders(self, jobrunversionid: int) -> list[str]:
+        jobid = self.get_current_jobid()  # Assuming there's a method to get the current job ID
+        sql = f"""
+        SELECT folderpath
+        FROM {self.jobfolderstable}
+        WHERE LOWER(foldertype) = 'initial'
+        AND jobrunversionid = ? 
+        """
+        rows = self.execute_query(sql, (jobrunversionid,),  fetchone=False)
+        return [r.folderpath for r in rows if r.folderpath]
+
+    def get_or_create_datafile(self, filetype: str, hashsha256: str, filesizebytes: int) -> tuple[int, bool]:
+        """
+        Returns (datafileid, is_new).
+        """
+
+        sel_sql = f"""
+        SELECT datafileid
+        FROM {self.datafiletable}
+        WHERE hashsha256 = ?
+        """
+        row = self.execute_query(sel_sql, (hashsha256,), fetchone=True)
+        if row:
+            return int(row[0]), False
+
+        ins_sql = f"""
+        INSERT INTO {self.datafiletable}
+        (filetype, hashsha256, filesizebytes)
+        OUTPUT INSERTED.datafileid
+        VALUES (?, ?, ?)
+        """
+        row = self.execute_returning_one(ins_sql, (filetype.lower(), hashsha256, filesizebytes))
+
+        new_id = row[0] if row and row[0] is not None else None
+        return int(new_id), True  
+    
+    def insert_jobfile_row(self, datafileid: int, jobrunversionid: int, newfile: bool,
+        folderid: int | None, filename: str, filecreateddate, filemodifieddate) -> int:
+
+        sql = f"""
+        INSERT INTO {self.jobfiletable}
+        (datafileid, jobrunversionid, newfile, folderid, filename, filecreateddate, filemodifieddate)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """
+        rowcount = self.execute_dml(sql, (
+            datafileid, jobrunversionid, 1 if newfile else 0,
+            folderid, filename, filecreateddate, filemodifieddate
+        ))
+        return rowcount
+    
+    def upsert_datafileobject_row(
+            self, datafileobject: DataFileObject
+        ):
+            if datafileobject.datafileobjectid == -1:
+                sql = f"""
+                INSERT INTO {self.datafileobjecttable}
+                (datafileid, objecttype, objectname, stagingtableschema, stagingtablename, skipobject)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """
+                params = (
+                    datafileobject.datafileid, datafileobject.objecttype, datafileobject.objectname,
+                    datafileobject.stagingtableschema, datafileobject.stagingtablename, datafileobject.skipobject
+                )
+            else:
+                sql = f"""
+                UPDATE {self.datafileobjecttable}
+                SET datafileid = ?, objecttype = ?, objectname = ?, stagingtableschema = ?, stagingtablename = ?, skipobject = ?
+                WHERE datafileobjectid = ?
+                """
+                params = (
+                    datafileobject.datafileid, datafileobject.objecttype, datafileobject.objectname,
+                    datafileobject.stagingtableschema, datafileobject.stagingtablename, datafileobject.skipobject,
+                    datafileobject.datafileobjectid
+                )
+
+   
+            rowcount = self.execute_dml(sql, params)
+
+            return rowcount
+
+    def get_datafiles_by_jobrunversionid_and_ext(self, jobrunversionid: int, exts: list[str]) -> list[Dict]:
+        in_placeholders = ", ".join("?" for _ in exts)
+        sql = f"""
+        SELECT df.datafileid, MIN(jf2.folderpath + '\\' + jf.filename) AS firstfilepath
+        FROM {self.jobfiletable} jf
+        INNER JOIN {self.datafiletable} df ON jf.datafileid = df.datafileid
+        INNER JOIN {self.jobfolderstable} jf2 ON jf.folderid = jf2.folderid
+        LEFT JOIN {self.datafileobjecttable} dfo ON df.datafileid = dfo.datafileid
+        WHERE jf.jobrunversionid = ?
+        AND df.filetype IN ({in_placeholders}) 
+        AND dfo.datafileobjectid IS NULL
+        GROUP BY df.datafileid
+        """
+        ###filetype list is hardcoded for now but should really lookup a list of readable file types. Then again they will only work if the switches are coded for the methods to handle them.
+        ###As a first stepe we can construct the list and pass it in.
+
+        ##print(f"DEBUG: SQL for file object read: {sql}")
+        params =[jobrunversionid, *exts]
+        rows = self.execute_query(sql, params, fetchone=False)
+        return rows
+
     @property
     def all_tables_info(self) -> List[Dict]:
         return self._all_tables_info
@@ -295,3 +503,8 @@ class DatabaseService(QObject):
     @property
     def user_defined_schemas(self) -> List[Dict]:
         return self._user_defined_schemas
+
+############# End of Class
+
+def normalize_path_key(pathlike) -> str:
+    return str(Path(pathlike).resolve()).replace("\\", "/").rstrip("/").lower()

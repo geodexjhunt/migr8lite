@@ -12,10 +12,12 @@ from PyQt6.QtWidgets import (    QApplication,    QFileDialog,    QGridLayout,  
 
 from app.services.import_service import ImportService
 from config.config import Config
+from app.services.file_service import get_file_counts
 
 
 class ImportTab(QWidget):
     status_changed = pyqtSignal(str)
+
     def __init__(
         self,
         context: MigrationContext, 
@@ -42,6 +44,8 @@ class ImportTab(QWidget):
 
         self.context.task_changed.connect(self._on_task_changed)
         self.context.table_changed.connect(self._on_table_changed)
+
+        self.import_service.log_appended.connect(self.append_log)
 
         self._setup_ui()
         #don't need to refresh as it is refreshed by the context signals
@@ -169,9 +173,6 @@ class ImportTab(QWidget):
         else:
             self.append_log(f"Schema '{schema}' does not exist.")   
 
-
-
-
     def _refresh_schema_combo(self):
         self.table_schema_combo.clear()
 
@@ -183,7 +184,6 @@ class ImportTab(QWidget):
 
         self.table_schema_combo.setCurrentIndex(0)
         
-
     def _refresh_ui(self):
         """Refresh the UI elements with the latest data."""
         self._refresh_database_info()
@@ -252,22 +252,152 @@ class ImportTab(QWidget):
         return True
 
 
-    def _run_import(self):
+    def _prompt_run_mode(self) -> str | None:
+        """
+        Returns: 'new', 'append', or None if cancelled.
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle("Run Mode")
+        box.setText("Do you wish to start a new run or append to the previous?")
+        new_btn = box.addButton("Yes - New Run", QMessageBox.ButtonRole.YesRole)
+        app_btn = box.addButton("No - Append to Previous", QMessageBox.ButtonRole.NoRole)
+        cancel_btn = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked == new_btn:
+            return "new"
+        if clicked == app_btn:
+            return "append"
+        if clicked == cancel_btn:
+            return None
+        return None
+
+    def _prompt_import_mode(self) -> str | None:
+        """
+        Returns: 'Import', 'Read', or None if cancelled.
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle("Import Mode")
+        box.setText("Do you wish to import the data after scanning files?")
+        import_btn = box.addButton("Import", QMessageBox.ButtonRole.YesRole)
+        read_btn = box.addButton("Read", QMessageBox.ButtonRole.NoRole)
+        cancel_btn = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked == import_btn:
+            return "Import"
+        if clicked == read_btn:
+            return "Read"
+        if clicked == cancel_btn:
+            return None
+        return None
+
+    def _prompt_read_fileobjects(self) -> bool | None:
+        """
+        Returns: True if user wants to read file objects, False if not, None if cancelled   
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle("Read File Objects?")
+        box.setText("Do you wish to read file objects (e.g., names of Excel sheets, Access tables)?")
+        yes_btn = box.addButton("Yes", QMessageBox.ButtonRole.YesRole)      
+        no_btn = box.addButton("No", QMessageBox.ButtonRole.NoRole)
+        cancel_btn = box.addButton(QMessageBox.StandardButton.Cancel)   
+        box.exec()  
+
+        clicked = box.clickedButton()
+        if clicked == yes_btn:
+            return True     
+        if clicked == no_btn:
+            return False
+        if clicked == cancel_btn:
+            return None 
+
+    def _prompt_read_fieldobjects(self) -> bool | None:
+        """
+        Returns: True if fields to be read, or None if cancelled.
+        """
+        box = QMessageBox(self)
+        #box.setWindowTitle("Read File Object Fields and Load Content?")
+        box.setWindowTitle("Read File Object Fields?")
+        box.setText("Do you wish to read file object fields (e.g., Excel sheet columns, Access table fields)?")
+        #\n\nSelect 'Read' to only read fields, or 'Import' to read fields and load content.")
+        fields_only_btn = box.addButton("Yes", QMessageBox.ButtonRole.YesRole)
+        no_btn = box.addButton("No", QMessageBox.ButtonRole.NoRole)
+        #fields_and_load_btn = box.addButton("Import", QMessageBox.ButtonRole.NoRole)
+        cancel_btn = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked == fields_only_btn:
+            return True
+        if clicked == no_btn:
+            return False
+        if clicked == cancel_btn:
+            return None
+        return None
+
+
+    def _run_import_step_1(self):
         """Collect UI values, validate them, and start an import."""
         import_config = self._get_inputs()
 
         if not self._validate_inputs(import_config):
             return
 
-        try:
-            self.import_service.run_import(import_config)
+        # --- prompts first ---
+        run_mode = self._prompt_run_mode()
+        if run_mode is None:
+            self.append_log("⏭️ Cancelled run mode selection.")
+            return  
 
-            self.append_log(
-                f"Running import with configuration: {import_config}"
-            )
-            self.status_changed.emit("Import completed successfully.")
+        read_objects = self._prompt_read_fileobjects()  
+        if read_objects is None:
+            self.append_log("⏭️ Cancelled read file objects selection.")
+            return  
 
-        except Exception as error:
-            self.append_log(f"Import failed: {error}")
-            self.status_changed.emit(f"Import failed: {error}")
-    
+        read_fields = self._prompt_read_fieldobjects()
+        if read_fields is None:
+            self.append_log("⏭️ Cancelled read file fields selection.")
+            return
+
+
+        # --- selected job context ---
+        jobid = self.context.get("current_task_id")
+        if not jobid:
+            QMessageBox.warning(self, "No Job Selected", "Please select a job before running.")
+            return
+
+        initial_folders = import_config.get("initial_folders")
+
+        if not initial_folders:
+            QMessageBox.warning(self, "No Initial Folders", "Please specify at least one initial folder before running.")
+            return
+        else:
+            grand_totals_by_ext, outstring = get_file_counts(initial_folders)
+            for line in outstring:
+                self.append_log(line)   
+            grand_total = sum(grand_totals_by_ext.values())
+            self.append_log(f"Grand total of all files: {grand_total}")
+
+        if grand_total == 0:
+            QMessageBox.information(self, "No Files", f"No matching files found in any initial folder")
+            return
+
+        # 1) resolve runversion (and insert RunVersion row if 'new')
+        runversion = self.db_service.resolve_runversion(run_mode)
+        self.append_log(f"▶ Job {jobid} using runversion={runversion} (mode={run_mode})")
+        jobrunversionid = self.db_service.get_runversionid(runversion) 
+
+        self.append_log(f"▶ JobRunVersionID: {jobrunversionid}")
+
+        ### run datafile scan and insert here
+
+        if read_objects:
+            self.append_log("▶ Reading file objects as requested.")
+            if read_fields:
+                self.append_log("▶ Reading file fields as requested.")
+                ##run datafile scan and insert including field scan and insert here
+            else:
+                ##run datafile scan and insert without field scan here

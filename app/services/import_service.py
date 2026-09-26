@@ -1,6 +1,7 @@
 ## Import Workflow logic here
 ## The service should not import QWidget, QMessageBox, QFileDialog, or update labels.
 import re
+from PyQt6.QtCore import pyqtSignal
 from datetime import date, datetime
 from typing import Dict, Tuple, Any
 from collections import defaultdict
@@ -11,42 +12,204 @@ from time import perf_counter
 
 from app.models.migration_context import MigrationContext
 from app.services.db_service import DatabaseService
+from app.services.file_service import scan_subfolders, collect_all_files, sha256_file, read_access_file_objects, read_excel_file_objects, read_text_file_objects
 from config.config import Config
-from app.constants import SQLSERVER_MAX_IDENTIFIER_LEN
+from app.constants import SQLSERVER_MAX_IDENTIFIER_LEN, DEFAULT_SETTINGS
 
 
 class ImportService:
     """Runs import operations using shared application services."""
-
+    log_appended = pyqtSignal(str)
     def __init__(
         self,
         config: Config,
         context: MigrationContext,
         db_service: DatabaseService,
     ) -> None:
-        self.config = config
-        self.context = context
-        self.db_service = db_service
+        self.config = config # config contains database connection settings and other configuration options including system schema & table name mapping
+        self.context = context # contains current task and current selected table
+        self.db_service = db_service # contains all database related operations and connections - anything sql related should be called from here
 
-    def run_import(self, import_config: dict[str, Any]) -> None:
-        """Run an import using settings collected by ImportTab."""
-        task_id = self.context.current_task_id
+        self.settings: dict[str, Any] = DEFAULT_SETTINGS
+    ## Import service will achieve two main objectives:
+    ## 1. Scan files in folders and attempt to read their headers.
+    ## 2. Import  file data into staging tables for further processing.
 
-        if task_id is None:
-            raise ValueError("A migration task must be selected before importing.")
+    def append_log(self, message: str) -> None:
+        """Append a message to the import log by emitting to the import_tab."""
+        self.log_appended.emit(message)
 
-        print(f"Running import for task: {task_id}")
-        print(f"Import configuration: {import_config}")
+    def run_file_scan(self, jobrunversionid) -> None:
+        """
+        Run step 1 which is to scan and import all files names & object names into the System DB
+        """
+        ## All pre-run validation is conducted within the import_tab
+        ## File counting is handeled by file service.
 
-        # Call the migrated import steps here:
-        #
-        # source_file = import_config["source_file"]
-        # rows = self._read_source_file(source_file)
-        # self._validate_rows(rows, import_config)
-        # self._create_staging_table(import_config)
-        # self._save_rows(rows, task_id, import_config)
+        # 2) scan/write found folders
+                    
+        initial_folders = self.db_service.get_initial_folders(jobrunversionid)
+        found = scan_subfolders(initial_folders)
+        inserted_folders = self.db_service.upsert_found_folders(jobrunversionid, found)
+        self.append_log(f"📁 Found folders scanned={len(found)}, inserted={inserted_folders}")
+
+        # optional: map found folder path -> folderid for JobFile FK
+        folderid_map = self.db_service.get_found_folderid_map(jobrunversionid)
+        self.append_log(f"📁 Folder ID Map Completed")
+
+        # 3) write DataFile + JobFile inventory rows
+        inventoried = 0
+        for folder in initial_folders:
+            p = Path(folder)
+            if not p.exists() or not p.is_dir():
+                raise ValueError(f"Initial folder does not exist: {folder}")
+                # return is no longer needed as the exception will halt execution
+
+            files_by_ext = collect_all_files(p)
+
+            for ext, files in files_by_ext.items():
+                for fp in files:
+                    file_hash = sha256_file(fp)
+                    file_size = fp.stat().st_size
+                    datafileid, is_new = self.db_service.get_or_create_datafile(
+                        ext.lstrip(".").lower(), file_hash, file_size
+                    )
+
+                    st = fp.stat()
+                    created_ts = getattr(st, "st_birthtime", None)
+                    if created_ts is None:
+                        created_ts = st.st_ctime
+
+                    created_dt = datetime.fromtimestamp(created_ts)
+                    modified_dt = datetime.fromtimestamp(st.st_mtime)
+
+                    # best effort folderid lookup from parent path
+                    folderid = folderid_map.get(normalize_path_key(fp.parent))
+
+                    if folderid is None:
+                        self.append_log(f"⚠️ No folderid for parent path: {fp.parent}")
+
+                    rowcount = self.db_service.insert_jobfile_row(
+                        datafileid=datafileid,
+                        jobrunversionid=jobrunversionid,
+                        newfile=is_new,
+                        folderid=folderid,
+                        filename=fp.name,
+                        filecreateddate=created_dt,
+                        filemodifieddate=modified_dt,
+                    )
 
 
+                    if rowcount == 0:
+                        self.append_log(f"⚠️ Failed to insert job file row for: {fp.name}") 
+                        continue
+                    else:
+                        inventoried += 1
+
+        self.append_log(f"🧾 File inventory written: {inventoried} row(s) to JobFile")
+
+        ## end of step one
+
+    def run_file_object_scan(self, jobrunversionid: int, read_fileobjectfields: bool) -> None:
+            self.process_file_objects(self, jobrunversionid,read_fileobjectfields)
+                
+            self.append_log("✅ Read mode complete (metadata/catalog written, no data imported).")
+            return
+
+    def process_file_objects(self,  jobrunversionid: int,read_fileobjectfields:bool):
+        ## Process Excel and Access files to read their sheets/tables and store metadata in JobFile.
+        ## For CSV files, we don't have sub-objects, but we add them to the file object table none the less.
+        # 1) Get all distinct datafileids within the JobFile rows for this runversionid
+        ### Because the same datafile may be used in multiple JobFile rows (e.g., same file in different folders), we want to avoid duplicates.
+        ### but we do need to select at least one file path to use for reading the file object (sheet/table) names. We'll just use the first one we find.
+        ### Added a left join to datafileobjects to only get datafileids that don't already have a file object row.
+        self.append_log("📖 Reading file objects (Excel sheets, Access tables)..."  )
+        operable = self.get_operable_filetypes()
+        exts = sorted(operable.keys())  # e.g. ['accdb','csv','mdb','txt','xls','xlsx']
+        if not exts:
+            self.append_log("⚠️ No operable filetypes configured.")
+            return
+
+        rows = self.db_service.get_datafiles_by_jobrunversionid_and_ext(jobrunversionid, exts)
+      
+
+        if rows is None or len(rows) == 0:
+            self.append_log("⚠️ No JobFile rows found for this runversionid, skipping file object read.")
+            return
+        else:   
+            self.append_log(f"📖 Found {len(rows)} distinct datafileid(s) to read file objects for.")
+
+
+        for row in rows:    
+            
+            datafileid = row.datafileid
+            first_file_path = normalize_path_key(row.firstfilepath)
+
+            if not first_file_path:
+                self.append_log(f"⚠️ No file path found for DataFileID {datafileid}, skipping.")
+                continue
+
+            fp = Path(first_file_path)
+            if not fp.exists():
+                self.append_log(f"⚠️ File does not exist: {fp}, skipping.")
+                continue
+
+            ext = fp.suffix.lower().lstrip(".")
+            meta = operable.get(ext)
+
+            if not meta:
+                self.append_log(f"⏭️ Unsupported extension for file object read: .{ext} ({fp.name})")
+                return  # or continue
+
+            ftype = (meta.get("type") or "").lower()
+            subtype = (meta.get("subtype") or "").lower()
+
+
+            if ftype == "excel":
+                dfo = None
+                dfo = read_excel_file_objects(fp,datafileid, read_fileobjectfields)
+
+            elif ftype == "text":
+                dfo = None
+                dfo = read_text_file_objects(fp,datafileid, read_fileobjectfields)
+
+            elif ftype == "database":
+                dfos = None
+                if subtype == "access":
+                    dfos = read_access_file_objects(fp,datafileid, read_fileobjectfields)
+                else:
+                    self.append_log(f"⏭️ Unsupported database subtype '{subtype}' for {fp.name}")
+
+            else:
+                self.append_log(f"⏭️ Unsupported file type '{ftype}' for {fp.name}")
+
+            if dfo is not None:
+                # Process the DataFileObject as needed
+                self.db_service.upsert_datafileobject_row(dfo)
+                pass
+            if dfos is not None:
+                for dfo in dfos:
+                    # Process each DataFileObject as needed
+                    self.db_service.upsert_datafileobject_row(dfo)
+        
+
+    def get_operable_filetypes(self) -> Dict[str, dict]:
+        settings = self.settings
+        raw = settings.get("operable_filetypes", {})
+        if not isinstance(raw, dict):
+            return {}
+
+        # normalize keys to extension without dot, lowercase
+        out: dict[str, dict] = {}
+        for ext, meta in raw.items():
+            if not isinstance(ext, str) or not isinstance(meta, dict):
+                continue
+            k = ext.lower().lstrip(".")
+            out[k] = {
+                "type": meta.get("type"),
+                "subtype": meta.get("subtype"),
+            }
+        return out
     
 
 ## Functions and methods below this line have been copied from app.py of the easycsvimporter.  
@@ -324,23 +487,7 @@ def get_incremented_table_name(base_name: str, schema: str, max_len: int = SQLSE
             return candidate
         i += 1
 
-def get_operable_filetypes() -> Dict[str, dict]:
-    settings = load_settings()
-    raw = settings.get("operable_filetypes", {})
-    if not isinstance(raw, dict):
-        return {}
 
-    # normalize keys to extension without dot, lowercase
-    out: dict[str, dict] = {}
-    for ext, meta in raw.items():
-        if not isinstance(ext, str) or not isinstance(meta, dict):
-            continue
-        k = ext.lower().lstrip(".")
-        out[k] = {
-            "type": meta.get("type"),
-            "subtype": meta.get("subtype"),
-        }
-    return out
 
 def get_object_exceptions() -> set[str]:
     s = load_settings()

@@ -19,6 +19,29 @@ class WorkflowPhase(str, Enum):
     REVIEW_ITERATE = "l_review_iterate"
 
 @dataclass
+class DataFileObject:
+    datafileobjectid: int
+    datafileid: int
+    objecttype: str = "sheet"
+    objectname: str
+    stagingtableschema: Optional[str] = None
+    stagingtablename: Optional[str] = None
+    skipobject: Optional[bool] = None
+    skipmessagge: Optional[str] = None
+
+@dataclass
+class DataFileObjectField:
+    datafileobjectfieldid: int
+    datafileobjectid: int
+    fieldordinal: int
+    fielddatatype: str
+    fieldlength: Optional[int] = None
+    fieldprecision: Optional[int] = None
+    skipfield: Optional[bool] = None
+    skipmessage: Optional[str] = None   
+
+
+@dataclass
 class SystemTableRegistry:
     sql_table: str
     label: str
