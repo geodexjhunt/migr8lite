@@ -1,8 +1,9 @@
 """System data model and registry definitions."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 class WorkflowPhase(str, Enum):
     DEFINE = "a_define"
@@ -19,16 +20,74 @@ class WorkflowPhase(str, Enum):
     REVIEW_ITERATE = "l_review_iterate"
 
 @dataclass
+class DataFile:
+    datafileid: int
+    filetype: str
+    hashsha256: str
+    filesizebytes: int
+    skipfile: Optional[bool] = None
+    skipmessage: Optional[str] = None
+    
+    @classmethod
+    def from_db_row(cls, row: dict[str, Any]) -> "DataFile":
+        """Construct a DataFile from a database result row."""
+        return cls(
+            datafileid=row["datafileid"],
+            filetype=row["filetype"],
+            hashsha256=row["hashsha256"],
+            filesizebytes=row["filesizebytes"],
+            skipfile=row["skipfile"],
+            skipmessage=row["skipmessage"],
+        )
+    
+@dataclass
+class JobFile:
+    jobfileid: int
+    datafileid: int
+    jobrunversionid: int
+    newfile: bool
+    folderid: int
+    filename: str
+    filecreateddate: Optional[datetime] = None
+    filemodifieddate: Optional[datetime] = None
+    @classmethod
+    def from_db_row(cls, row: dict[str, Any]) -> "JobFile":
+        """Construct a JobFile from a database result row."""
+        return cls(
+            jobfileid=row["jobfileid"],
+            datafileid=row["datafileid"],
+            jobrunversionid=row["jobrunversionid"],
+            newfile=row["newfile"],
+            folderid=row.get("folderid"),
+            filename=row["filename"],
+            filecreateddate=row["filecreateddate"],
+            filemodifieddate=row["filemodifieddate"],
+        )
+    
+@dataclass
 class DataFileObject:
     datafileobjectid: int
     datafileid: int
-    objecttype: str = "sheet"
+    objecttype: str
     objectname: str
     stagingtableschema: Optional[str] = None
     stagingtablename: Optional[str] = None
     skipobject: Optional[bool] = None
-    skipmessagge: Optional[str] = None
-
+    skipmessage: Optional[str] = None
+    @classmethod
+    def from_db_row(cls, row: dict[str, Any]) -> "DataFileObject":
+        """Construct a DataFileObject from a database result row."""
+        return cls(
+            datafileobjectid=row["datafileobjectid"],
+            datafileid=row["datafileid"],
+            objecttype=row.get("objecttype", "sheet"),
+            objectname=row["objectname"],
+            stagingtableschema=row.get("stagingtableschema"),
+            stagingtablename=row.get("stagingtablename"),
+            skipobject=row.get("skipobject"),
+            skipmessage=row.get("skipmessagge"),
+        )
+    
 @dataclass
 class DataFileObjectField:
     datafileobjectfieldid: int
@@ -39,7 +98,19 @@ class DataFileObjectField:
     fieldprecision: Optional[int] = None
     skipfield: Optional[bool] = None
     skipmessage: Optional[str] = None   
-
+    @classmethod
+    def from_db_row(cls, row: dict[str, Any]) -> "DataFileObjectField":
+        """Construct a DataFileObjectField from a database result row."""
+        return cls(
+            datafileobjectfieldid=row["datafileobjectfieldid"],
+            datafileobjectid=row["datafileobjectid"],
+            fieldordinal=row["fieldordinal"],
+            fielddatatype=row["fielddatatype"],
+            fieldlength=row.get("fieldlength"),
+            fieldprecision=row.get("fieldprecision"),
+            skipfield=row.get("skipfield"),
+            skipmessage=row.get("skipmessage"),
+        )   
 
 @dataclass
 class SystemTableRegistry:

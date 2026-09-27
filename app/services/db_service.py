@@ -6,8 +6,8 @@ from typing import Any, Dict, List, Optional
 import pyodbc
 from pathlib import Path
 
-from app.models.system_model import DataFileObject
-from app.models.system_model import DataFileObject
+
+from app.models.system_model import DataFileObject, DataFile, DataFileObjectField, JobFile   
 from config.config import Config
 from PyQt6.QtCore import pyqtSignal, QObject
 
@@ -16,15 +16,35 @@ class DatabaseConnectionError(Exception):
 
 class DatabaseService(QObject):
     table_cache_changed = pyqtSignal()
+    datafile_cache_changed = pyqtSignal()
+    jobfile_cache_changed = pyqtSignal()
+    datafileobject_cache_changed = pyqtSignal()
+    datafileobjectfield_cache_changed = pyqtSignal()
 
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
         self._connection = None
 
+
         self._user_defined_schemas: List[Dict] = []
         self._all_tables_info: List[Dict] = []
         self._table_lookup: set[tuple[str, str]] = set()
+        # Datafile caching
+        self._datafiles_by_hash: dict[str, DataFile] = {}
+        self._datafiles_by_id: dict[int, DataFile] = {}
+
+        # JobFile caching: keyed by (datafileid, jobrunversionid) tuple
+        self._jobfiles_by_composite_key: dict[tuple[int, int], JobFile] = {}
+        # Secondary index: keyed by jobfileid for direct lookup
+        self._jobfiles_by_id: dict[int, JobFile] = {}
+
+
+        # Datafile object caching
+        self._datafileobjects_by_id: dict[int, DataFileObject] = {}
+        # Datafile object field caching
+        self._datafileobjectfields_by_id: dict[int, DataFileObjectField] = {}
+
 
         ## tables are stored as schema.tablename 
         ## to be able to wrap them in square brackets we need to insert square brackets around the period
@@ -35,7 +55,8 @@ class DatabaseService(QObject):
         self.datafiletable = config.system_management_config.get("datafile_table")
         self.jobrunversiontable = config.system_management_config.get("jobrunversion_table")
         self.jobfolderstable = config.system_management_config.get("jobfolders_table")
-    
+        self.datafileobjectfieldtable = config.system_management_config.get("datafileobjectfield_table")
+
     def build_connection_string(self) -> str:
         db_config = self.config.database_config
         server = db_config.get("server", "localhost")
@@ -227,6 +248,28 @@ class DatabaseService(QObject):
         """
         return self.execute_query(query, (task_id,))    
 
+    def get_jobfolders_for_task(self, task_id: int) -> List[Dict]:
+        """Fetch all folders associated with a specific migration task."""
+        query = f"""
+        SELECT jfo.* FROM {self.jobfolderstable} jfo
+        INNER JOIN {self.jobrunversiontable} jrv 
+        ON jfo.[jobrunversionid] = jrv.[jobrunversionid] 
+        WHERE jrv.[runversion] = 1 and jrv.[jobid] = ? Order By jfo.[folderid] Asc
+        """
+        return self.execute_query(query, (task_id,))   
+
+    def get_initial_jobfolders_for_task(self, task_id: int) -> List[Dict]:
+        """Fetch all folders associated with a specific migration task."""
+        query = f"""
+        SELECT jfo.* FROM {self.jobfolderstable} jfo
+        INNER JOIN {self.jobrunversiontable} jrv 
+        ON jfo.[jobrunversionid] = jrv.[jobrunversionid] 
+        WHERE jrv.[runversion] = 1 and jrv.[jobid] = ? 
+        AND lower(jfo.foldertype) = 'initial'
+        Order By jfo.[folderid] Asc
+        """
+        return self.execute_query(query, (task_id,))  
+
     def get_datafileobjects_for_task(self, task_id: int) -> List[Dict]:
         """Fetch all datafile objects associated with a specific migration task."""
         query = f"""
@@ -316,19 +359,26 @@ class DatabaseService(QObject):
         """Check whether a table exists, using the cached metadata."""
         return (schema, table_name) in self._table_lookup
 
-    def get_max_runversion(self) -> int | None:
-        jobid = self.current_jobid
+    def get_max_runversion(self, task_id: int) -> int | None:
+        jobid = task_id
         sql = f"""
-        SELECT MAX(runversion)
+        SELECT MAX(runversion) as max_runversion
         FROM {self.jobrunversiontable}
         WHERE jobid = ?
         """
-        row = self.execute_query(sql, (jobid,), fetchone=True)
-        return int(row[0]) if row and row[0] is not None else None
 
-    def resolve_runversion(self, mode: str) -> int:
-        jobid = self.current_jobid
-        max_rv = self.get_max_runversion()
+        rows = self.execute_query(sql,(jobid,),fetchone=True)
+    
+        if not rows:
+                return None
+
+        value = rows[0]["max_runversion"]
+        return int(value) if value is not None else None
+
+
+    def resolve_runversion(self, mode: str, task_id: int) -> int:
+        jobid = task_id
+        max_rv = self.get_max_runversion(task_id)
 
         if mode == "append":
             if max_rv is None:
@@ -345,16 +395,21 @@ class DatabaseService(QObject):
         self.execute_dml(sql, (jobid, next_rv, datetime.now()))
         return next_rv
    
-    def get_runversionid(self, runversion: int) -> int | None:
-        jobid = self.current_jobid
+    def get_runversionid(self, runversion: int, task_id: int) -> int | None:
+        jobid = task_id
 
         sql = f"""
         SELECT jobrunversionid
         FROM {self.jobrunversiontable}
         WHERE jobid = ? AND runversion = ?
         """
-        row = self.execute_query(sql, (jobid, runversion), fetchone=True)
-        return int(row[0]) if row and row[0] is not None else None
+        rows = self.execute_query(sql, (jobid, runversion), fetchone=True)
+
+        if not rows:
+            return None
+
+        value = rows[0]["jobrunversionid"]
+        return int(value) if value is not None else None
     
     def upsert_found_folders(self, jobrunversionid: int, found_folders: list[tuple[str, str]]) -> int:
         """
@@ -393,10 +448,19 @@ class DatabaseService(QObject):
         """
         rows =self.execute_query(sql, (jobrunversionid,), fetchone=False)
         #return {str(r.folderpath).lower(): int(r.folderid) for r in rows if r.folderpath}
-        return {normalize_path_key(r.folderpath): int(r.folderid) for r in rows if r.folderpath}
+        if not rows:
+            return None
+
+        result = {}
+        for r in rows:
+            path = normalize_path_key(r["folderpath"])    
+            id = r["folderid"]   
+            if path is not None and id is not None:
+                result[path] = int(id)
+        return result
+
 
     def get_initial_folders(self, jobrunversionid: int) -> list[str]:
-        jobid = self.get_current_jobid()  # Assuming there's a method to get the current job ID
         sql = f"""
         SELECT folderpath
         FROM {self.jobfolderstable}
@@ -404,77 +468,183 @@ class DatabaseService(QObject):
         AND jobrunversionid = ? 
         """
         rows = self.execute_query(sql, (jobrunversionid,),  fetchone=False)
-        return [r.folderpath for r in rows if r.folderpath]
 
-    def get_or_create_datafile(self, filetype: str, hashsha256: str, filesizebytes: int) -> tuple[int, bool]:
+        if not rows:
+            return None
+
+        result = []
+        for r in rows:
+            value = normalize_path_key(r["folderpath"])       
+            if value is not None:
+                result.append(value)
+        return result
+
+    def upsert_datafile_row(self, newdatafile: "DataFile") -> tuple[int, bool]:
         """
         Returns (datafileid, is_new).
         """
 
-        sel_sql = f"""
-        SELECT datafileid
-        FROM {self.datafiletable}
-        WHERE hashsha256 = ?
-        """
-        row = self.execute_query(sel_sql, (hashsha256,), fetchone=True)
-        if row:
-            return int(row[0]), False
-
+        df = self.get_datafile_by_hash(newdatafile.hashsha256)
+        if df is not None:
+            print(f"DataFile with hash {newdatafile.hashsha256} already exists.")
+            return int(df.datafileid), False
+        
         ins_sql = f"""
         INSERT INTO {self.datafiletable}
         (filetype, hashsha256, filesizebytes)
         OUTPUT INSERTED.datafileid
         VALUES (?, ?, ?)
         """
-        row = self.execute_returning_one(ins_sql, (filetype.lower(), hashsha256, filesizebytes))
+        row = self.execute_returning_one(ins_sql, (newdatafile.filetype.lower(), newdatafile.hashsha256, newdatafile.filesizebytes))
 
-        new_id = row[0] if row and row[0] is not None else None
+        if row is not None:
+            new_id = row["datafileid"]
+            newdatafile.datafileid = new_id
+            self._datafiles_by_hash[newdatafile.hashsha256] = newdatafile
+            self._datafiles_by_id[new_id] = newdatafile
+            self.datafile_cache_changed.emit()
+        else:
+            new_id = None
+
         return int(new_id), True  
     
-    def insert_jobfile_row(self, datafileid: int, jobrunversionid: int, newfile: bool,
-        folderid: int | None, filename: str, filecreateddate, filemodifieddate) -> int:
+    def upsert_jobfile_row(self, jobfile: "JobFile") -> int:
+        ## Although this is named upsert, we don't actually update existing jobfile rows; we only insert new ones.
+        jf_existing = self.get_jobfile(jobfile.datafileid, jobfile.jobrunversionid)
+        if jf_existing is not None:
+            return -1
 
         sql = f"""
         INSERT INTO {self.jobfiletable}
         (datafileid, jobrunversionid, newfile, folderid, filename, filecreateddate, filemodifieddate)
+        OUTPUT INSERTED.jobfileid
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """
-        rowcount = self.execute_dml(sql, (
-            datafileid, jobrunversionid, 1 if newfile else 0,
-            folderid, filename, filecreateddate, filemodifieddate
+        row = self.execute_returning_one(sql, (
+            jobfile.datafileid, jobfile.jobrunversionid, 1 if jobfile.newfile else 0,
+            jobfile.folderid, jobfile.filename, jobfile.filecreateddate, jobfile.filemodifieddate
         ))
-        return rowcount
+
+        if row is not None and row["jobfileid"] is not None:
+            jobfile.jobfileid = row["jobfileid"]
+            self._jobfiles_by_id[jobfile.jobfileid] = jobfile
+            self._jobfiles_by_composite_key[(jobfile.datafileid, jobfile.jobrunversionid)] = jobfile
+            self.jobfile_cache_changed.emit()
+            return 1
+        return 0
+
+    def upsert_datafileobject_row(self,datafileobject: "DataFileObject") -> int:
+        """Insert or update a DataFileObject record."""
+        if datafileobject.datafileobjectid == -1:
+            return self._insert_datafileobject(datafileobject)
+        else:
+            return self._update_datafileobject(datafileobject)
+
+    def upsert_datafileobjectfield_row(self, datafileobjectfield: "DataFileObjectField") -> int:
+        """Insert or update a DataFileObjectField record."""
+        if datafileobjectfield.datafileobjectfieldid == -1:
+            return self._insert_datafileobjectfield(datafileobjectfield)
+        else:
+            return self._update_datafileobjectfield(datafileobjectfield)
+
+    def _insert_datafileobjectfield(self,obj: "DataFileObjectField") -> int:
+        """Insert a new DataFileObjectField record."""
+        sql = f"""
+        INSERT INTO {self.datafileobjectfieldtable} 
+        (datafileobjectid, fieldname, fieldtype, fieldlength, fieldprecision, skipfield, skipmessage)
+        OUTPUT INSERTED.datafileobjectfieldid
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        params = (
+            obj.datafileobjectid,
+            obj.fieldname,
+            obj.fieldtype,
+            obj.fieldlength,
+            obj.fieldprecision,
+            obj.skipfield,
+            obj.skipmessage,
+        )
+        row = self.execute_returning_one(sql, params)
+        if row is not None and row["datafileobjectfieldid"] is not None:
+            obj.datafileobjectfieldid = row["datafileobjectfieldid"]
+            self._datafileobjectfields_by_id[obj.datafileobjectfieldid] = obj
+            self.datafileobjectfield_cache_changed.emit()
+            return 1
+        return 0
+
+    def _update_datafileobjectfield(self,obj: "DataFileObjectField") -> int:
+        """Update an existing DataFileObjectField record."""
+        sql = f"""
+        UPDATE {self.datafileobjectfieldtable} 
+        SET datafileobjectid = ?, fieldname = ?, fieldtype = ?, fieldlength = ?, fieldprecision = ?, skipfield = ?, skipmessage = ?
+        WHERE datafileobjectfieldid = 
+        """
+        params = (
+            obj.datafileobjectid,
+            obj.fieldname,
+            obj.fieldtype,
+            obj.fieldlength,
+            obj.fieldprecision,
+            obj.skipfield,
+            obj.skipmessage,
+        )
+        row = self.execute_dml(sql, params)
+        if row is not None and row > 0:
+            self._datafileobjectfields_by_id[obj.datafileobjectfieldid] = obj
+            self.datafileobjectfield_cache_changed.emit()
+            return 1
+        return 0
+
+    def _insert_datafileobject(self,obj: "DataFileObject") -> int:
+        sql = f"""
+        INSERT INTO {self.datafileobjecttable}
+        (datafileid, objecttype, objectname, stagingtableschema, stagingtablename, skipobject)
+        OUTPUT INSERTED.datafileobjectid
+        VALUES (?, ?, ?, ?, ?, ?)
+        """
+        params = (
+            obj.datafileid,
+            obj.objecttype,
+            obj.objectname,
+            obj.stagingtableschema,
+            obj.stagingtablename,
+            obj.skipobject,
+        )
+        row = self.execute_returning_one(sql, params)
+        if row is not None and row["datafileobjectid"] is not None:
+            obj.datafileobjectid = row["datafileobjectid"]
+            self._datafileobjects_by_id[obj.datafileobjectid] = obj
+            self.datafileobject_cache_changed.emit()
+            return 1
+        return 0
+
+    def _update_datafileobject(self,obj: "DataFileObject") -> int:
+        sql = f"""
+        UPDATE {self.datafileobjecttable}
+        SET datafileid = ?,
+            objecttype = ?,
+            objectname = ?,
+            stagingtableschema = ?,
+            stagingtablename = ?,
+            skipobject = ?
+        WHERE datafileobjectid = ?
+        """
+        params = (
+            obj.datafileid,
+            obj.objecttype,
+            obj.objectname,
+            obj.stagingtableschema,
+            obj.stagingtablename,
+            obj.skipobject,
+            obj.datafileobjectid,
+        )
+        row = self.execute_dml(sql, params)
+        if row is not None and row > 0:
+            self._datafileobjects_by_id[obj.datafileobjectid] = obj
+            self.datafileobjectfield_cache_changed.emit()
+            return 1
+        return 0
     
-    def upsert_datafileobject_row(
-            self, datafileobject: DataFileObject
-        ):
-            if datafileobject.datafileobjectid == -1:
-                sql = f"""
-                INSERT INTO {self.datafileobjecttable}
-                (datafileid, objecttype, objectname, stagingtableschema, stagingtablename, skipobject)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """
-                params = (
-                    datafileobject.datafileid, datafileobject.objecttype, datafileobject.objectname,
-                    datafileobject.stagingtableschema, datafileobject.stagingtablename, datafileobject.skipobject
-                )
-            else:
-                sql = f"""
-                UPDATE {self.datafileobjecttable}
-                SET datafileid = ?, objecttype = ?, objectname = ?, stagingtableschema = ?, stagingtablename = ?, skipobject = ?
-                WHERE datafileobjectid = ?
-                """
-                params = (
-                    datafileobject.datafileid, datafileobject.objecttype, datafileobject.objectname,
-                    datafileobject.stagingtableschema, datafileobject.stagingtablename, datafileobject.skipobject,
-                    datafileobject.datafileobjectid
-                )
-
-   
-            rowcount = self.execute_dml(sql, params)
-
-            return rowcount
-
     def get_datafiles_by_jobrunversionid_and_ext(self, jobrunversionid: int, exts: list[str]) -> list[Dict]:
         in_placeholders = ", ".join("?" for _ in exts)
         sql = f"""
@@ -495,6 +665,103 @@ class DatabaseService(QObject):
         params =[jobrunversionid, *exts]
         rows = self.execute_query(sql, params, fetchone=False)
         return rows
+
+    def refresh_datafile_cache(self) -> None:
+        """Re-query datafiles and refresh the internal cache."""
+        if not self._connection:
+            self._datafiles_by_hash = {}
+            return
+
+        rows = self.execute_query(
+            f"SELECT datafileid, filetype, hashsha256, filesizebytes, skipfile, skipmessage FROM {self.datafiletable}"
+        )
+
+        self._datafiles_by_hash = {
+            row["hashsha256"]: DataFile.from_db_row(row)
+            for row in rows
+        }
+
+        self.datafile_cache_changed.emit()
+
+    def datafile_exists_by_hash(self, hash_value: str) -> bool:
+        """Check if a datafile with the given hash already exists."""
+        return hash_value in self._datafiles_by_hash
+
+    def get_datafile_by_hash(self, hash_value: str) -> DataFile | None:
+        """Retrieve a datafile record by its hash."""
+        return self._datafiles_by_hash.get(hash_value)
+
+    def get_datafile_by_id(self, datafile_id: int) -> DataFile | None:
+        """Retrieve a datafile record by its ID."""
+        return self._datafiles_by_id.get(datafile_id)
+    
+    def refresh_jobfile_cache(self) -> None:
+        """Re-query jobfiles and refresh the internal cache."""
+        if not self._connection:
+            self._jobfiles_by_composite_key = {}
+            self._jobfiles_by_id = {}
+            return
+
+        rows = self.execute_query(
+            f"""
+            SELECT jobfileid, datafileid, jobrunversionid, newfile,
+                   folderid, filename, filecreateddate, filemodifieddate
+            FROM {self.jobfiletable}
+            """
+        )
+
+        self._jobfiles_by_composite_key = {
+            (row["datafileid"], row["jobrunversionid"]): JobFile.from_db_row(
+                row
+            )
+            for row in rows
+        }
+
+        self._jobfiles_by_id = {
+            row["jobfileid"]: JobFile.from_db_row(row)
+            for row in rows
+        }
+
+        self.jobfile_cache_changed.emit()
+
+    def jobfile_exists(self,datafile_id: int,jobrunversion_id: int) -> bool:
+        """Check if a jobfile with the given composite key already exists."""
+        return (datafile_id, jobrunversion_id) in self._jobfiles_by_composite_key
+
+    def get_jobfile(self,datafile_id: int,jobrunversion_id: int) -> JobFile | None:
+        """Retrieve a jobfile by datafileid and jobrunversionid."""
+        return self._jobfiles_by_composite_key.get(
+            (datafile_id, jobrunversion_id)
+        )
+
+    def get_jobfile_by_id(self, jobfile_id: int) -> JobFile | None:
+        """Retrieve a jobfile by its ID."""
+        return self._jobfiles_by_id.get(jobfile_id)
+    
+    def add_datafileobjects_to_cache(self,objects: list[DataFileObject] ) -> None:
+        """Add or update datafileobjects in the cache."""
+        for obj in objects:
+            self._datafileobjects_by_id[obj.datafileobjectid] = obj
+
+        self.datafileobject_cache_changed.emit()
+
+    def add_datafileobjectfields_to_cache(self,fields: list[DataFileObjectField]) -> None:
+        """Add or update datafileobjectfields in the cache."""
+        for field in fields:
+            self._datafileobjectfields_by_id[field.datafileobjectfieldid] = field
+
+        self.datafileobjectfield_cache_changed.emit()
+
+
+    @property
+    def all_jobfiles(self) -> list[JobFile]:
+        """Return all cached jobfile records."""
+        return list(self._jobfiles_by_composite_key.values())
+    
+    @property
+    def all_datafiles(self) -> list[DataFile]:
+        """Return all cached datafile records (for UI listing, etc.)."""
+        return list(self._datafiles_by_hash.values())
 
     @property
     def all_tables_info(self) -> List[Dict]:

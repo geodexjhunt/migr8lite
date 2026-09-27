@@ -25,7 +25,8 @@ class MainWindow(QMainWindow):
         self.context = MigrationContext(self)
 
         self.db_service.refresh_table_cache()
-
+        self.db_service.refresh_datafile_cache()
+        
         self._connect_database()
         self._update_database_info_cache()
 
@@ -40,7 +41,7 @@ class MainWindow(QMainWindow):
         self._create_view_menu()
         self._toggle_dark_mode(self.dark_mode_enabled)
 
-
+        self.db_service.refresh_datafile_cache()
 
     def _update_database_info_cache(self) -> None:
         if self.db_service._connection:

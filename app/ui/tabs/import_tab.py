@@ -130,7 +130,7 @@ class ImportTab(QWidget):
         layout.addLayout(ext2_row, 7, 1, 1, 2)
 
         self.run_btn = QPushButton("Run Load")
-        #self.run_btn.clicked.connect(self.run_process)
+        self.run_btn.clicked.connect(self._run_import_step_1)
         layout.addWidget(self.run_btn, 8, 1)
 
         self.read_fileobjects_btn = QPushButton("List File Objects of Latest Run for this Job")
@@ -198,11 +198,15 @@ class ImportTab(QWidget):
         self.append_log(f"Refreshed Database Info: Server={p.get('server', '')}, Database={p.get('database', '')}")
 
     def _get_selected_job_initial_folders(self, currentjob: int = None) -> list[str]:
-        self.append_log(f"This woulld query folders for jobid: {currentjob}.")
-        return ["1","2","3","4","5"]
+        initialjobfolders = self.db_service.get_initial_jobfolders_for_task(currentjob) 
+        return [f.get('folderpath') for f in initialjobfolders]
+    
 
     def _refresh_selected_job_folders_list(self):
         currentjob = self.current_task
+        if currentjob is None:
+            self.append_log(f"Cant load job folders until a job is selected.")
+            return
         self.initial_folders_list.clear()
         for p in self._get_selected_job_initial_folders(currentjob):
             self.initial_folders_list.addItem(QListWidgetItem(p))
@@ -237,8 +241,8 @@ class ImportTab(QWidget):
             "database": self.database_input.text().strip(),
             "table_prefix": self.table_prefix_input.text().strip(),
             "date_format": self.date_format_combo.currentText().strip(),
-            "table_schema": self.table_schema_input.text().strip(),
-            "initial_folders": self._get_selected_job_initial_folders(),
+            "table_schema": self.table_schema_combo.currentText().strip(),
+            "initial_folders": self._get_selected_job_initial_folders(self.current_task),
             "task_id": self.current_task,
         }
     
@@ -250,7 +254,6 @@ class ImportTab(QWidget):
                 return False
 
         return True
-
 
     def _prompt_run_mode(self) -> str | None:
         """
@@ -338,7 +341,6 @@ class ImportTab(QWidget):
             return None
         return None
 
-
     def _run_import_step_1(self):
         """Collect UI values, validate them, and start an import."""
         import_config = self._get_inputs()
@@ -364,7 +366,7 @@ class ImportTab(QWidget):
 
 
         # --- selected job context ---
-        jobid = self.context.get("current_task_id")
+        jobid = self.context.current_task_id
         if not jobid:
             QMessageBox.warning(self, "No Job Selected", "Please select a job before running.")
             return
@@ -386,18 +388,26 @@ class ImportTab(QWidget):
             return
 
         # 1) resolve runversion (and insert RunVersion row if 'new')
-        runversion = self.db_service.resolve_runversion(run_mode)
+        runversion = self.db_service.resolve_runversion(run_mode, jobid)
         self.append_log(f"▶ Job {jobid} using runversion={runversion} (mode={run_mode})")
-        jobrunversionid = self.db_service.get_runversionid(runversion) 
+        jobrunversionid = self.db_service.get_runversionid(runversion, jobid) 
 
         self.append_log(f"▶ JobRunVersionID: {jobrunversionid}")
 
         ### run datafile scan and insert here
-
+        self.import_service.run_file_scan(jobrunversionid)
         if read_objects:
             self.append_log("▶ Reading file objects as requested.")
             if read_fields:
                 self.append_log("▶ Reading file fields as requested.")
-                ##run datafile scan and insert including field scan and insert here
             else:
-                ##run datafile scan and insert without field scan here
+                self.append_log("▶ Skipping file fields as not requested.")
+
+            self.import_service.run_file_object_scan(jobrunversionid,read_fields)
+            
+            if read_fields:
+                self.append_log("▶ File scan and Obeject Scan completed including field scan.")
+            else:
+                self.append_log("▶ File scan and Object Scan completed without field scan.")
+        else:
+            self.append_log("▶ File Scan Complete. No file objects or field scan requested.")
