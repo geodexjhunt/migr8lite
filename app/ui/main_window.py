@@ -1,7 +1,9 @@
 """Main application window."""
 
-from PyQt6.QtWidgets import QDialog, QComboBox,QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTabWidget, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QTreeWidget, QTreeWidgetItem
-from PyQt6.QtGui import QIcon, QFont, QAction
+from tokenize import group
+
+from PyQt6.QtWidgets import QCheckBox, QDialog, QComboBox,QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTabWidget, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QTreeWidget, QTreeWidgetItem
+from PyQt6.QtGui import QBrush, QBrush, QColor, QIcon, QFont, QAction
 from PyQt6.QtCore import Qt
 from config.config import Config
 from app.services.db_service import DatabaseService
@@ -26,7 +28,11 @@ class MainWindow(QMainWindow):
 
         self.db_service.refresh_table_cache()
         self.db_service.refresh_datafile_cache()
-        
+
+        if self.context.current_jobrunversionid is not None:
+            self.db_service.refresh_jobfolder_cache(self.context.current_jobrunversionid)
+            self.db_service.refresh_jobfile_cache(self.context.current_jobrunversionid)
+
         self._connect_database()
         self._update_database_info_cache()
 
@@ -41,11 +47,15 @@ class MainWindow(QMainWindow):
         self._create_view_menu()
         self._toggle_dark_mode(self.dark_mode_enabled)
 
-        self.db_service.refresh_datafile_cache()
+
 
     def _update_database_info_cache(self) -> None:
         if self.db_service._connection:
             self.db_service.refresh_table_cache()
+            self.db_service.refresh_datafile_cache()
+            if self.context.current_jobrunversionid is not None:
+                self.db_service.refresh_jobfolder_cache(self.context.current_jobrunversionid)
+                self.db_service.refresh_jobfile_cache(self.context.current_jobrunversionid)
    
     def _setup_ui(self) -> None:
         central_widget = QWidget()
@@ -69,6 +79,13 @@ class MainWindow(QMainWindow):
             self._on_migration_task_changed
         )
         task_layout.addWidget(self.migration_task_combo, 1)
+
+        task_layout.addWidget(QLabel("Run Version:"))
+        self.jobrunversion_combo = QComboBox()
+        self.jobrunversion_combo.currentIndexChanged.connect(
+            self._on_jobrunversion_changed
+        )
+        task_layout.addWidget(self.jobrunversion_combo, 1)
 
         self.btn_new_task = QPushButton("New")
         self.btn_edit_task = QPushButton("Edit")
@@ -105,6 +122,7 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.status_label)
 
         self._refresh_task_list()
+        self._refresh_jobrunversion_list()
         self._refresh_task_table_panel(self.migration_task_combo.currentData())
 
 
@@ -152,12 +170,21 @@ class MainWindow(QMainWindow):
 
      
 
-
     def _create_task_table_panel(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel) 
 
-        layout.addWidget(QLabel("Objects in Current Task"))
+
+        self.group_by_file = QCheckBox("Group by Folder?")  
+        self.group_by_file.setChecked(False)
+        self.group_by_file.stateChanged.connect(lambda _: self._refresh_task_table_panel(self.migration_task_combo.currentData()))
+
+        header_layout = QHBoxLayout()   
+        
+        header_layout.addWidget(QLabel("Objects in Current Task"))
+        header_layout.addWidget(self.group_by_file)
+
+        layout.addLayout(header_layout)
 
         self.task_table_tree = QTreeWidget()
         self.task_table_tree.setHeaderLabel("File & Object >> Table")
@@ -171,39 +198,82 @@ class MainWindow(QMainWindow):
 
     def _refresh_task_table_panel(self, task_id: int) -> None:
         """Refresh the task table panel to show tables for the given task."""
+        #print(f"DEBUG: jobfolder cache size = {len(self.db_service._jobfolders_by_id)}")
+
         try:
             tables = self.db_service.get_datafileobjects_for_task(task_id)
+          
             all_tables_info = self.context.all_tables_info  # renamed - don't shadow
             self.task_table_tree.clear()
 
+            group_by_file = self.group_by_file.isChecked()
+
             # Group by distinct filename
-            filename_dict: dict[str, list] = {}
+            filename_dict: dict[tuple[int, str], list] = {}
             for row in tables:
                 filename = row['filename']
-                filename_dict.setdefault(filename, []).append(row)
+                folderid = row['folderid']
+                #print(f"DEBUG: row folderid = {folderid!r} (type={type(folderid)})")
+                filename_dict.setdefault((folderid, filename), []).append(row)
 
+            if group_by_file:
+                for folderid in sorted({key[0] for key in filename_dict.keys()}):
+                    folder = self.db_service.get_jobfolder(folderid)
+                    if folder:
+                        folder_item = QTreeWidgetItem([f"{folder.folderpath}"])
+                        folder_item.setExpanded(True)
+                        folder_item.setData(0, Qt.ItemDataRole.UserRole, folderid)
+                        folder_item.setFlags(folder_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                        folder_item.setCheckState(0, Qt.CheckState.Unchecked)
+                        folder_item.setForeground(0, QBrush(QColor("blue")))
+                        folder_item.setBackground(0, QBrush(QColor("lightgray")))
+
+            prevfolderid: int = -1            
             # Create tree structure
-            for filename in sorted(filename_dict.keys()):
-                file_item = QTreeWidgetItem([filename])
+            for folderid, filename in sorted(filename_dict.keys()):
+                folder = self.db_service.get_jobfolder(folderid)
+                folderpath = folder.folderpath if folder else ""
+                file_item = QTreeWidgetItem([f"{filename} -- {folderpath}"])
 
+                if group_by_file and folderid != prevfolderid:
+                    folder_item = QTreeWidgetItem([f"{folder.folderpath}"])
+                    folder_item.setExpanded(True)
+                    folder_item.setData(0, Qt.ItemDataRole.UserRole, folderid)
+                    #folder_item.setFlags(folder_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                    #folder_item.setCheckState(0, Qt.CheckState.Unchecked)
+                    folder_item.setForeground(0, QBrush(QColor("blue")))
+                    folder_item.setBackground(0, QBrush(QColor("lightgray")))
+                    
+
+                prevfolderid = folderid
                 for table in sorted(
-                    filename_dict[filename],
-                    key=lambda x: x['stagingtablename']
+                    filename_dict[(folderid, filename)],
+                    key=lambda x: x['stagingtablename'] or "",
                 ):
                     # Compare staging table info against actual imported tables
-                    imported = any(
+                    staging_name = table["stagingtablename"]
+                    staging_schema = table["stagingtableschema"]
+                    imported = ( 
+                        staging_name is not None
+                        and staging_schema is not None
+                        and any(
                         t['TABLE_NAME'] == table['stagingtablename']
                         and t['TABLE_SCHEMA'] == table['stagingtableschema']
                         for t in all_tables_info
+                        )
                     )
 
                     item = QTreeWidgetItem(
-                        [f"{table['stagingtablename']} {'✔' if imported else '✖'}"]
+                        [f"{table['objectname']} {'✔' if imported else '✖'} {staging_name or '(no staging table)'}"]
                     )
                     item.setData(0, Qt.ItemDataRole.UserRole, table)
                     file_item.addChild(item)
 
-                self.task_table_tree.addTopLevelItem(file_item)
+                if group_by_file:
+                    folder_item.addChild(file_item)
+                    self.task_table_tree.addTopLevelItem(folder_item)
+                else:
+                    self.task_table_tree.addTopLevelItem(file_item)
 
         except Exception as error:
             print(f"DEBUG: Failed to refresh task table panel: {error}")
@@ -212,11 +282,26 @@ class MainWindow(QMainWindow):
         else:
             self.status_label.setText("Task table panel refreshed successfully")
 
+    def _on_jobrunversion_changed(self) -> None:
+        jobrunversion_id = self.jobrunversion_combo.currentData()
+        self.context.set_jobrunversion(jobrunversion_id)
+
+        self.db_service.refresh_jobfolder_cache(jobrunversion_id)
+        self.db_service.refresh_jobfile_cache(jobrunversion_id)      
+
+
     def _on_migration_task_changed(self) -> None:
         """When migration task changes, notify context."""
         task_id = self.migration_task_combo.currentData()
         print(f"DEBUG: Migration task changed to: {task_id}")
         self.context.set_task(task_id)
+
+        self.db_service.refresh_table_cache()
+        self.db_service.refresh_datafile_cache()
+        if self.context.current_jobrunversionid is not None:
+            self.db_service.refresh_jobfolder_cache(self.context.current_jobrunversionid)
+            self.db_service.refresh_jobfile_cache(self.context.current_jobrunversionid)
+
         
         # Refresh the task table panel to show tables for new task
         self._refresh_task_table_panel(task_id)
@@ -293,6 +378,21 @@ class MainWindow(QMainWindow):
                 self.migration_task_combo.addItem(task['jobname'], task['jobid'])
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to refresh task list: {e}")
+
+    def _refresh_jobrunversion_list(self) -> None:
+        """Refresh the job run version list in the combo box."""
+        if self.context.current_task_id is None:
+            self.jobrunversion_combo.clear()
+            return
+        else:
+            try:
+                jobrunversions = self.db_service.get_jobrunversions(self.context.current_task_id)
+                self.jobrunversion_combo.clear()
+                for jobrunversion in jobrunversions:
+                    self.jobrunversion_combo.addItem(f"{jobrunversion.runversion}", jobrunversion.jobrunversionid)
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to refresh job run version list: {e}")
+
 
     def _select_task_in_combo(self, task_id: int) -> None:
         """Select a task in the combo box by its ID."""

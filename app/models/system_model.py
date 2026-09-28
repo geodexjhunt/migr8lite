@@ -63,6 +63,52 @@ class JobFile:
             filecreateddate=row["filecreateddate"],
             filemodifieddate=row["filemodifieddate"],
         )
+    def has_same_content(self, other: "JobFile") -> bool:
+        """
+        Compare only the fields that matter for upsert logic.
+        Ignore jobfileid (PK), datafileid/jobrunversionid (FK lookup keys),
+        and timestamps (may differ naturally).
+        """
+        return (
+
+            self.datafileid == other.datafileid
+            and self.filecreateddate == other.filecreateddate
+            and self.filemodifieddate == other.filemodifieddate
+        )
+    
+@dataclass
+class JobFolder:
+    folderid: int
+    jobrunversionid: int
+    foldertype: str
+    foldername: str
+    folderpath: str
+    @classmethod
+    def from_db_row(cls, row: dict[str, Any]) -> "JobFolder":   
+        """Construct a JobFolder from a database result row."""
+        return cls(
+            folderid=row["folderid"],
+            jobrunversionid=row["jobrunversionid"],
+            foldertype=row["foldertype"],
+            foldername=row["foldername"],
+            folderpath=row["folderpath"],
+        )
+
+@dataclass
+class JobRunVersion:
+    jobrunversionid: int
+    jobid: int
+    runversion: str
+    rundatetime: Optional[datetime] = None
+    @classmethod
+    def from_db_row(cls, row: dict[str, Any]) -> "JobRunVersion":   
+        """Construct a JobRunVersion from a database result row."""
+        return cls(
+            jobrunversionid=row["jobrunversionid"],
+            jobid=row["jobid"],
+            runversion=row["runversion"],
+            rundatetime=row["rundatetime"],
+        )
     
 @dataclass
 class DataFileObject:

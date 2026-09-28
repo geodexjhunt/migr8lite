@@ -1,5 +1,8 @@
 from PyQt6.QtWidgets import QApplication
+import os
 
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+CHECKMARK_PATH = os.path.join(BASE_DIR, "img", "checkmark_white.svg").replace("\\", "/")
 
 DARK_STYLESHEET = """
 /* Base application */
@@ -404,6 +407,27 @@ QTabBar::tab:selected {
 }
 
 /* Data grids, trees, and lists */
+QTreeWidget::item {
+    color: #322c3d;
+    background-color: #ffffff;
+    padding: 2px;
+    min-height: 23px;
+}
+
+QTreeWidget::item:hover {
+    background-color: #f0ede8;
+}
+
+QTreeWidget::item:selected {
+    background-color: #9b7fc2;
+    color: #ffffff;
+}
+
+QTreeWidget::item:first-column {
+    color: #0000ff;
+    background-color: #d3d3d3;
+}
+
 QTableWidget,
 QTableView,
 QTreeWidget,
@@ -492,6 +516,37 @@ QMessageBox {
     background-color: #f2f1f5;
     color: #322c3d;
 }
+
+/* Check boxes * /
+QCheckBox {
+    color: #000000;
+    spacing: 5px;
+}
+
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 2px solid #333333;
+    border-radius: 2px;
+    background-color: #FFFFFF;
+}
+
+QCheckBox::indicator:hover {
+    border: 2px solid #0078D4;
+    background-color: #F0F7FF;
+}
+
+QCheckBox::indicator:checked {
+    background-color: #0078D4;
+    border: 2px solid #0078D4;
+    image: url(:/icons/checkmark.png);
+}
+
+QCheckBox::indicator:unchecked:focus {
+    border: 2px solid #0078D4;
+    outline: 1px solid #0078D4;
+}
+
 
 /* Group boxes */
 QGroupBox {

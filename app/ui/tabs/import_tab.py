@@ -17,6 +17,7 @@ from app.services.file_service import get_file_counts
 
 class ImportTab(QWidget):
     status_changed = pyqtSignal(str)
+    update_table_list = pyqtSignal()
 
     def __init__(
         self,
@@ -44,6 +45,8 @@ class ImportTab(QWidget):
 
         self.context.task_changed.connect(self._on_task_changed)
         self.context.table_changed.connect(self._on_table_changed)
+
+        self.db_service.importtab_log_append.connect(self.append_log)
 
         self.import_service.log_appended.connect(self.append_log)
 
@@ -343,10 +346,13 @@ class ImportTab(QWidget):
 
     def _run_import_step_1(self):
         """Collect UI values, validate them, and start an import."""
+        self.append_log("▶ Starting import step 1.")
         import_config = self._get_inputs()
 
         if not self._validate_inputs(import_config):
             return
+        self.append_log("▶ Input params validated..")
+
 
         # --- prompts first ---
         run_mode = self._prompt_run_mode()
@@ -411,3 +417,5 @@ class ImportTab(QWidget):
                 self.append_log("▶ File scan and Object Scan completed without field scan.")
         else:
             self.append_log("▶ File Scan Complete. No file objects or field scan requested.")
+
+        self.update_table_list.emit()

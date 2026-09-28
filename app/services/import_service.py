@@ -52,8 +52,9 @@ class ImportService(QObject):
                     
         initial_folders = self.db_service.get_initial_folders(jobrunversionid)
         found = scan_subfolders(initial_folders)
+        ## we should only return the folders that were actually inserted!
         inserted_folders = self.db_service.upsert_found_folders(jobrunversionid, found)
-        self.append_log(f"📁 Found folders scanned={len(found)}, inserted={inserted_folders}")
+        self.append_log(f"📁 Found folders scanned={len(found)}, inserted={len(inserted_folders)}")
 
         # optional: map found folder path -> folderid for JobFile FK
         folderid_map = self.db_service.get_found_folderid_map(jobrunversionid)
@@ -82,6 +83,9 @@ class ImportService(QObject):
 
                     datafileid, is_new = self.db_service.upsert_datafile_row(newdatafile)
 
+                    if is_new == False:
+                        self.append_log(f"ℹ️ DataFile for {fp.name} already exists with hash {newdatafile.hashsha256}.")
+
                     st = fp.stat()
                     created_ts = getattr(st, "st_birthtime", None)
                     if created_ts is None:
@@ -106,24 +110,32 @@ class ImportService(QObject):
                         filecreateddate=created_dt,
                         filemodifieddate=modified_dt
                     )
-
-                    rowcount = self.db_service.upsert_jobfile_row(newjobfile)
+                    file_status: str = ""
+                    newjobfile, file_status = self.db_service.upsert_jobfile_row(newjobfile)
                          
-                    if rowcount == 0:
+                    if file_status == "error":
                         self.append_log(f"⚠️ Failed to insert job file row for: {fp.name}") 
                         continue
-                    if rowcount == -1:
-                        self.append_log(f"⚠️ Job file row already exists for: {fp.name} and jobrunversionid: {jobrunversionid}")
-                        continue                        
-                    else:
+                    elif file_status == "no update":
+                        self.append_log(f"ℹ️ No update - Job file row already exists for: {fp.name} and jobrunversionid: {jobrunversionid}")
                         inventoried += 1
+                        continue          
+                    elif file_status == "updated":
+                        self.append_log(f"ℹ️ Updated - Job file row already exists for: {fp.name} and jobrunversionid: {jobrunversionid}")
+                        inventoried += 1
+                        continue       
+                    elif file_status == "inserted":
+                        self.append_log(f"ℹ️ Inserted - Job file: {fp.name} and jobrunversionid: {jobrunversionid}")
+                        inventoried += 1
+                        continue              
+      
 
         self.append_log(f"🧾 File inventory written: {inventoried} row(s) to JobFile")
 
         ## end of step one
 
     def run_file_object_scan(self, jobrunversionid: int, read_fileobjectfields: bool) -> None:
-            self.process_file_objects(self, jobrunversionid,read_fileobjectfields)
+            self.process_file_objects(jobrunversionid,read_fileobjectfields)
                 
             self.append_log("✅ Read mode complete (metadata/catalog written, no data imported).")
             return
@@ -151,13 +163,14 @@ class ImportService(QObject):
         else:   
             self.append_log(f"📖 Found {len(rows)} distinct datafileid(s) to read file objects for.")
 
+        total_dfos = []
+        total_dfofs = []
 
         for row in rows:    
             
             datafileid = row["datafileid"]
             df = self.db_service.get_datafile_by_id(datafileid)
             first_file_path = self.normalize_path_key(row["firstfilepath"])
-
 
             if not first_file_path:
                 self.append_log(f"⚠️ No file path found for DataFileID {datafileid}, skipping.")
@@ -183,16 +196,11 @@ class ImportService(QObject):
 
             dfos, fieldobjects = process_datafile(self.db_service, fp, datafileid, ftype, subtype, read_fileobjectfields)
 
-            ## Already updated cache during the upserts.
-            #if dfos is not None:
-            #    for dfo in dfos:
-            #        self.db_service.add_datafileobjects_to_cache([dfo])
-            self.append_log(f"📖 Added {len(dfos)} datafileobjects to cache.")
-            #
-            #if fieldobjects is not None:
-            #    for fof in fieldobjects:
-            #        self.db_service.add_datafileobjectfields_to_cache([fof])
-            self.append_log(f"📖 Added {len(fieldobjects)} datafileobjectfields to cache.")
+            total_dfos.extend(dfos)
+            total_dfofs.extend(fieldobjects)
+
+        self.append_log(f"📖 Added {len(total_dfos)} datafileobjects to cache.")
+        self.append_log(f"📖 Added {len(total_dfofs)} datafileobjectfields to cache.")
      
     def get_operable_filetypes(self) -> Dict[str, dict]:
         settings = self.settings

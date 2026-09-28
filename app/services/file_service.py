@@ -174,17 +174,19 @@ def process_datafile(db_service: DatabaseService,fp: Path,datafileid: int, ftype
                 )
                 for obj in datafileobjects:
                     saved_obj = db_service.upsert_datafileobject_row(obj)
-                    saved_objects.append(saved_obj)
+                    if saved_obj is not None:
+                        saved_objects.append(saved_obj)
 
-                    if read_fileobjectfields:
-                        fieldobjects = _read_excel_fields(
-                            excel_file=excel_file,
-                            sheet_name=obj.objectname,
-                            datafileobjectid=saved_obj.datafileobjectid,
-                        )
-                        for field in fieldobjects:
-                            saved_field = db_service.upsert_datafileobjectfield_row(field)
-                            saved_fields.append(saved_field)
+                        if read_fileobjectfields:
+                            fieldobjects = _read_excel_fields(
+                                excel_file=excel_file,
+                                sheet_name=obj.objectname,
+                                datafileobjectid=saved_obj.datafileobjectid,
+                            )
+                            for field in fieldobjects:
+                                saved_field = db_service.upsert_datafileobjectfield_row(field)
+                                if saved_field is not None:
+                                    saved_fields.append(saved_field)
 
         elif ftype == "database" and subtype == "access":
 
@@ -197,20 +199,22 @@ def process_datafile(db_service: DatabaseService,fp: Path,datafileid: int, ftype
                 )
                 for obj in datafileobjects:
                     saved_obj = db_service.upsert_datafileobject_row(obj)
-                    saved_objects.append(saved_obj)              
-                    if read_fileobjectfields:
-                        fieldobjects = _read_access_fields(
-                            connection=acc_conn,
-                            table_name= saved_obj.objectname,
-                            datafileobjectid=saved_obj.datafileobjectid,
-                        )
-                        for field in fieldobjects:
-                            saved_field = db_service.upsert_datafileobjectfield_row(field)
-                            saved_fields.append(saved_field)
+                    if saved_obj is not None:
+                        saved_objects.append(saved_obj)              
+                        if read_fileobjectfields:
+                            fieldobjects = _read_access_fields(
+                                connection=acc_conn,
+                                table_name= saved_obj.objectname,
+                                datafileobjectid=saved_obj.datafileobjectid,
+                            )
+                            for field in fieldobjects:
+                                saved_field = db_service.upsert_datafileobjectfield_row(field)
+                                if saved_field is not None:
+                                    saved_fields.append(saved_field)
 
         elif ftype == "text":
             datafileobjects = _read_text_objects(
-                filepath=fp,
+                fp=fp,
                 datafileid=datafileid,
                 
             )
@@ -219,7 +223,7 @@ def process_datafile(db_service: DatabaseService,fp: Path,datafileid: int, ftype
                 saved_objects.append(saved_obj)   
                 if read_fileobjectfields:
                     fieldobjects = _read_text_fields(
-                        filepath=fp,
+                        fp=fp,
                         datafileobjectid=saved_obj.datafileobjectid,
                     )
                     for field in fieldobjects:
@@ -236,9 +240,9 @@ def process_datafile(db_service: DatabaseService,fp: Path,datafileid: int, ftype
 
     return saved_objects, fieldobjects
 
-def _read_excel_objects(self,excel_file: pd.ExcelFile,datafileid: int) -> list[DataFileObject]:
+def _read_excel_objects(excel_file: pd.ExcelFile,datafileid: int) -> list[DataFileObject]:
     """Read sheet names from an already-open Excel file."""
-    objects = []
+    objects = []    
 
     for sheet_name in excel_file.sheet_names:
         objects.append(
@@ -256,23 +260,22 @@ def _read_excel_objects(self,excel_file: pd.ExcelFile,datafileid: int) -> list[D
 
     return objects
 
-def _read_excel_fields(self,excel_file: pd.ExcelFile,sheetname: str, datafileobjectid: int) -> list[DataFileObjectField]:
+def _read_excel_fields(excel_file: pd.ExcelFile,sheet_name: str, datafileobjectid: int) -> list[DataFileObjectField]:
     """Read column headers from an already-open Excel file."""
     fields = []
 
-    for sheet_name in excel_file.sheet_names:
-        try:
-            df = excel_file.parse(sheet_name)  # Just read header
-            if df is not None:
-                fields = get_fields_from_dataframe(df, datafileobjectid=datafileobjectid)
-        except Exception as e:
-            print(
-                f"Error reading fields from sheet '{sheet_name}': {e}"
-            )
+    try:
+        df = excel_file.parse(sheet_name)  # Just read header
+        if df is not None:
+            fields = get_fields_from_dataframe(df, datafileobjectid=datafileobjectid)
+    except Exception as e:
+        print(
+            f"Error reading fields from sheet '{sheet_name}': {e}"
+        )
 
     return fields
 
-def _read_access_objects(self,connection: pyodbc.Connection,datafileid: int) -> list[DataFileObject]:
+def _read_access_objects(connection: pyodbc.Connection,datafileid: int) -> list[DataFileObject]:
     """Read table names from an already-open Access connection."""
     objects = []
 
@@ -302,7 +305,7 @@ def _read_access_objects(self,connection: pyodbc.Connection,datafileid: int) -> 
 
     return objects
 
-def _read_access_fields(self,connection: pyodbc.Connection,table_name: str,datafileobjectid: int) -> list[DataFileObjectField]:
+def _read_access_fields(connection: pyodbc.Connection,table_name: str,datafileobjectid: int) -> list[DataFileObjectField]:
     """Read column names from tables in an already-open Access connection."""
     fields: list[DataFileObjectField] = []
 
@@ -500,11 +503,10 @@ def load_text_file_to_dataframe(file_path: Path, drop_all_null_columns: bool = T
     - .xlsx/.xls => read_excel ## we don't do this anymore in this method
     """
     operable = get_operable_filetypes()
-    ext_path = file_path.suffix.lower().lstrip(".")
+    ext_path = file_path.suffix.lower().lstrip(".").rstrip()
     meta = operable.get(ext_path)
-    if not meta:
+    if meta is None:
         raise ValueError(f"Unsupported extension for parser: {ext_path}")
-        return
     
     ftype = (meta.get("type") or "").lower()
     subtype = (meta.get("subtype") or "").lower()
@@ -512,7 +514,7 @@ def load_text_file_to_dataframe(file_path: Path, drop_all_null_columns: bool = T
     try:
         if ftype == "text" and subtype == "csv":
             df, used_enc = read_csv_with_fallback(file_path, dtype=str, keep_default_na=True)
-        elif ftype == "text" and subtype is None:
+        elif ftype == "text":
             df, used_enc = read_csv_with_fallback(file_path, dtype=str, sep=None, engine="python", keep_default_na=True)
         else:
             raise ValueError(f"Unsupported extension for parser: {ext_path}")
@@ -587,8 +589,9 @@ def sanitize_column_name(col: str, fallback_idx: int) -> str:
         c = f"column_{fallback_idx}"
     return c
 
-def get_operable_filetypes(self) -> Dict[str, dict]:
+def get_operable_filetypes() -> Dict[str, dict]:
     settings = DEFAULT_SETTINGS
+
     raw = settings.get("operable_filetypes", {})
     if not isinstance(raw, dict):
         return {}
