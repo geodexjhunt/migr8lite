@@ -11,7 +11,7 @@ from pandas.errors import ParserError
 from time import perf_counter
 
 from app.models.migration_context import MigrationContext
-from app.models.system_model import DataFile, DataFileObject, DataFileObjectField, JobFile
+from app.models.system_model import DataFile, DataFileObject, DataFileObjectField, JobFile, JobRunVersion, Job
 from app.services.db_service import DatabaseService
 from app.services.file_service import process_datafile, scan_subfolders, collect_all_files, sha256_file
 from config.config import Config
@@ -154,6 +154,13 @@ class ImportService(QObject):
             self.append_log("⚠️ No operable filetypes configured.")
             return
 
+        jobrunversion: JobRunVersion = self.db_service.get_jobrunversion_by_id(jobrunversionid) 
+        job: Job = self.db_service.get_job_by_id(jobrunversion.jobid)
+
+        stagingschema = job.schemaname
+        stagingprefix = job.jobprefix
+
+
         rows = self.db_service.get_datafiles_by_jobrunversionid_and_ext(jobrunversionid, exts)
       
 
@@ -194,7 +201,17 @@ class ImportService(QObject):
             fieldobjects: list[DataFileObjectField] = [] 
             dfos: list[DataFileObject] = []
 
-            dfos, fieldobjects = process_datafile(self.db_service, fp, datafileid, ftype, subtype, read_fileobjectfields)
+            datafileobjecttemplate: DataFileObject = DataFileObject(
+                datafileid=datafileid,
+                stagingtableschema=stagingschema,
+                stagingtablename=stagingprefix,
+                datafileobjectid=-1,
+                objecttype=ftype,
+                objectname="unknown",
+            )
+             
+
+            dfos, fieldobjects = process_datafile(self.db_service, fp, datafileid, ftype, subtype, read_fileobjectfields, datafileobjecttemplate)
 
             total_dfos.extend(dfos)
             total_dfofs.extend(fieldobjects)
@@ -219,8 +236,7 @@ class ImportService(QObject):
                 "subtype": meta.get("subtype"),
             }
         return out
-    
-
+  
     def json_default(self,o):
         if isinstance(o, (datetime, date)):
             return o.isoformat()

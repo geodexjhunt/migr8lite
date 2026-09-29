@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtCore import Qt
-
+from typing import List, Dict
 from app.models.migration_context import MigrationContext
 from config.config import Config
 from app.services.db_service import DatabaseService
@@ -80,7 +80,12 @@ class ExtractTab(QWidget):
             if jobrunversion is None:
                 return
             self.db_service.refresh_jobfolder_cache(jobrunversion)
+            
+            tables: List[Dict] = []
+            datafiles: dict[int, Dict] = {}           
+            
             tables = self.db_service.get_datafileobjects_for_task(task_id)
+            datafiles = self.db_service.get_datafile_occurrence_number(task_id)
             all_tables_info = self.context.all_tables_info
 
             self._updating_checks = True  # suppress itemChanged while (re)building
@@ -94,13 +99,18 @@ class ExtractTab(QWidget):
                 filename_dict.setdefault((folderid, filename), []).append(row)
 
             prevfolderid: int = -1
+            alldups: bool = True
             folder_item: QTreeWidgetItem | None = None
 
             for folderid, filename in sorted(filename_dict.keys()):
                 folder = self.db_service.get_jobfolder(folderid)
                 folderpath = folder.folderpath if folder else ""
-                print(f"Processing folder: {folderpath}")
+                fileid = filename_dict[(folderid, filename)][0]['jobfileid']
+                datafile_occurrence_number = datafiles[fileid]['occurrence_number'] if fileid in datafiles else 1
+                #print(f"DEBUG: fileid = {fileid}, datafile_occurrence_number = {datafile_occurrence_number}")
+                #print(f"Processing folder: {folderpath}")
                 if folderid != prevfolderid:
+                    alldups = True
                     folder_item = QTreeWidgetItem([folderpath])
                     folder_item.setExpanded(True)
                     folder_item.setData(0, Qt.ItemDataRole.UserRole, {"level": "folder", "folderid": folderid})
@@ -115,6 +125,13 @@ class ExtractTab(QWidget):
                     prevfolderid = folderid
 
                 file_item = QTreeWidgetItem([filename])
+
+                if datafile_occurrence_number > 1:
+                    file_item.setForeground(0, QBrush(QColor("red")))
+                else:
+                    file_item.setForeground(0, QBrush(QColor("black")))
+                    alldups = False
+    
                 file_item.setData(0, Qt.ItemDataRole.UserRole, {"level": "file", "folderid": folderid, "filename": filename})
                 file_item.setFlags(
                     file_item.flags()
@@ -122,6 +139,7 @@ class ExtractTab(QWidget):
                     | Qt.ItemFlag.ItemIsAutoTristate
                 )
                 file_item.setCheckState(0, Qt.CheckState.Unchecked)
+               
 
                 for table in sorted(
                     filename_dict[(folderid, filename)],
@@ -143,12 +161,22 @@ class ExtractTab(QWidget):
                         [f"{table['objectname']} {'✔' if imported else '✖'} {staging_name or '(no staging table)'}"]
                     )
                     table_item.setData(0, Qt.ItemDataRole.UserRole, {"level": "table", "row": table})
+                    
                     table_item.setFlags(table_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                     table_item.setCheckState(0, Qt.CheckState.Unchecked)
+
+                    if datafile_occurrence_number > 1:
+                        table_item.setFlags(table_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+
                     file_item.addChild(table_item)
 
-                folder_item.addChild(file_item)
+                if datafile_occurrence_number > 1:
+                    file_item.setFlags(file_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
 
+                folder_item.addChild(file_item)
+                if alldups == True:
+                    folder_item.setFlags(folder_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+                    folder_item.setForeground(0, QBrush(QColor("red")))
             self._updating_checks = False
 
         except Exception as error:

@@ -77,7 +77,7 @@ class ImportTab(QWidget):
         self.database_input = QLineEdit()
         self.database_input.setReadOnly(True)
 
-        self.table_prefix_input = QLineEdit("stg")
+        self.table_prefix_input = QLineEdit()
         #self.table_schema_input = QLineEdit("migr")
         self.table_schema_combo = QComboBox()
 
@@ -191,6 +191,7 @@ class ImportTab(QWidget):
         """Refresh the UI elements with the latest data."""
         self._refresh_database_info()
         self._refresh_selected_job_folders_list()
+        self._refresh_job_fields()
 
     def _refresh_database_info(self):
         p = self.config.get("database", None)
@@ -200,11 +201,27 @@ class ImportTab(QWidget):
         self.database_input.setText(p.get("database", ""))
         self.append_log(f"Refreshed Database Info: Server={p.get('server', '')}, Database={p.get('database', '')}")
 
+    def _refresh_job_fields(self):
+        currentjob = self.current_task
+        if currentjob is None:
+            return
+        job = self.db_service.get_job_by_id(currentjob)
+        if job is None:
+            return
+        jobprefix = job.jobprefix or ""
+        schemaname = job.schemaname or ""
+        self.table_prefix_input.setText(jobprefix)
+        self.table_schema_combo.setCurrentText(schemaname)
+
     def _get_selected_job_initial_folders(self, currentjob: int = None) -> list[str]:
         initialjobfolders = self.db_service.get_initial_jobfolders_for_task(currentjob) 
         return [f.get('folderpath') for f in initialjobfolders]
-    
 
+    def _on_task_changed(self, currentjob: int = None):
+        self.current_task = currentjob
+        ## need to update the UI from the cache.
+        self._refresh_ui()
+  
     def _refresh_selected_job_folders_list(self):
         currentjob = self.current_task
         if currentjob is None:

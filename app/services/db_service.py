@@ -7,7 +7,7 @@ import pyodbc
 from pathlib import Path
 
 
-from app.models.system_model import DataFileObject, DataFile, DataFileObjectField, JobFile, JobFolder, JobRunVersion 
+from app.models.system_model import DataFileObject, DataFile, DataFileObjectField, JobFile, JobFolder, JobRunVersion, Job
 from config.config import Config
 from PyQt6.QtCore import pyqtSignal, QObject
 
@@ -15,6 +15,7 @@ class DatabaseConnectionError(Exception):
     pass
 
 class DatabaseService(QObject):
+    job_cache_changed = pyqtSignal()
     table_cache_changed = pyqtSignal()
     datafile_cache_changed = pyqtSignal()
     jobfile_cache_changed = pyqtSignal()
@@ -22,6 +23,8 @@ class DatabaseService(QObject):
     datafileobjectfield_cache_changed = pyqtSignal()
     jobfolder_cache_changed = pyqtSignal()
     importtab_log_append = pyqtSignal(str)    
+    jobrunversion_cache_changed = pyqtSignal()
+
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
@@ -31,6 +34,13 @@ class DatabaseService(QObject):
         self._user_defined_schemas: List[Dict] = []
         self._all_tables_info: List[Dict] = []
         self._table_lookup: set[tuple[str, str]] = set()
+
+        # Job Caching
+        self._jobs_by_id: dict[int, Job] = {}
+
+        # Job Run Version Caching
+        self._jobrunversion_by_id: dict[int, JobRunVersion] = {}
+
         # Datafile caching
         self._datafiles_by_hash: dict[str, DataFile] = {}
         self._datafiles_by_id: dict[int, DataFile] = {}
@@ -47,11 +57,11 @@ class DatabaseService(QObject):
     
         # Datafile object caching
         self._datafileobjects_by_id: dict[int, DataFileObject] = {}
+        self._datafileobjects_by_name_and_fileid: dict[tuple[str, int], DataFileObject] = {}
 
         # Datafile object field caching
         self._datafileobjectfields_by_id: dict[int, DataFileObjectField] = {}
-
-
+        self._datafileobjectfields_by_objectid_and_ordinal: dict[tuple[int, int], DataFileObjectField] = {}
 
         ## tables are stored as schema.tablename 
         ## to be able to wrap them in square brackets we need to insert square brackets around the period
@@ -282,7 +292,7 @@ class DatabaseService(QObject):
     def get_datafileobjects_for_task(self, task_id: int) -> List[Dict]:
         """Fetch all datafile objects associated with a specific migration task."""
         query = f"""
-        SELECT jf.filename, jf.folderid, dfo.* 
+        SELECT jf.jobfileid,jf.filename, jf.folderid, dfo.*
         FROM {self.datafileobjecttable} dfo
         INNER JOIN {self.jobfiletable} jf
         ON dfo.[datafileid] = jf.[datafileid]
@@ -292,6 +302,28 @@ class DatabaseService(QObject):
         ORDER BY jf.[filename], dfo.[datafileobjectid] Asc
         """
         return self.execute_query(query, (task_id,))    
+
+    def get_datafile_occurrence_number(self, task_id: int) -> Dict[int,Dict]:
+        """Fetch all datafiles associated with a specific migration task, including their occurrence number."""
+        query = f"""
+        SELECT jf.jobfileid, jf.filename, jf.folderid, df.*, row_number() over(partition by df.datafileid order by jf.jobfileid) as occurrence_number
+        FROM {self.datafiletable} df
+        INNER JOIN {self.jobfiletable} jf
+        ON df.[datafileid] = jf.[datafileid]
+        INNER JOIN {self.jobrunversiontable} jrv 
+        ON jf.[jobrunversionid] = jrv.[jobrunversionid] 
+        WHERE jrv.[runversion] = 1 and jrv.[jobid] = ?
+        ORDER BY jf.[filename], df.[datafileid] Asc
+        """
+        
+        rows = self.execute_query(query, (task_id,))            
+
+        result: Dict[int,Dict] = {}
+        for row in rows:
+            jobfileid = row['jobfileid']
+            result[jobfileid] = row
+        return result
+
 
     def save_migration_task(self, task_id: Optional[int], name: str, description: str, schemaname: str, jobprefix: str, status: str, purpose: str) -> int:
         """Save a migration task. If task_id is None, create a new task; otherwise, update the existing task."""
@@ -429,11 +461,11 @@ class DatabaseService(QObject):
 
         for foldername, folderpath in found_folders:
             normalized_path = self.normalize_path_key(folderpath)
-            print(f"Normalized path: {normalized_path} for folderpath: {folderpath}")
+            #print(f"Normalized path: {normalized_path} for folderpath: {folderpath}")
             existing = self.get_jobfolder_by_path(normalized_path)
             
             if existing is not None:
-                print(f"Existing folder: {existing.folderpath}")
+                #print(f"Existing folder: {existing.folderpath}")
                 # Update existing folder
                 folderid = existing.folderid
                 obj = JobFolder(jobrunversionid=jobrunversionid, folderid=folderid, foldertype='found', foldername=foldername, folderpath=self.normalize_path_key(folderpath))
@@ -611,18 +643,47 @@ class DatabaseService(QObject):
 
     def upsert_datafileobject_row(self,datafileobject: "DataFileObject") -> "DataFileObject":
         """Insert or update a DataFileObject record."""
-        if datafileobject.datafileobjectid == -1:
-            return self._insert_datafileobject(datafileobject)
-        else:
-            return self._update_datafileobject(datafileobject)
 
+        existing_df = self.get_datafileobject_by_name_and_fileid(datafileobject.objectname, datafileobject.datafileid)
+
+        try:
+            if existing_df is None:
+                print(f"Inserting datafileobject: {datafileobject.datafileid} :: {datafileobject.datafileobjectid} :: {datafileobject.objectname}")
+                return self._insert_datafileobject(datafileobject)
+            else:
+                ## Equalise the staging details as these are predicated on the current job details
+                ## the schema passed down in datafileobject will be correct so needs updating.
+                ## the prefix passed down in datafileobject will be correct so can be used in the tablename
+                ## the tablename will need checking against the datafileid and correcting if either part has changed
+                padded_id = str(existing_df.datafileobjectid).zfill(8)
+                stagingname = datafileobject.stagingtablename + "_" + padded_id
+                datafileobject.stagingtablename = stagingname
+
+                if existing_df.has_same_content(datafileobject):
+                    print(f"No changes detected for datafileobject: {datafileobject.datafileid} :: {existing_df.datafileobjectid} :: {datafileobject.objectname}")
+                    return existing_df
+                else:
+                    print(f"Updating datafileobject: {datafileobject.datafileid} :: {existing_df.datafileobjectid} :: {datafileobject.objectname}")
+                    # Ensure the print statement is executed before returning the updated object   
+                    datafileobject.datafileobjectid = existing_df.datafileobjectid 
+                    return self._update_datafileobject(datafileobject)
+                
+        except Exception as e:
+            print(f"Error occurred while upserting datafileobject: {datafileobject.datafileid} :: {datafileobject.datafileobjectid} :: {datafileobject.objectname}  ::  error {e}")
+            return None
+        
     def upsert_datafileobjectfield_row(self, datafileobjectfield: "DataFileObjectField") -> "DataFileObjectField":
         """Insert or update a DataFileObjectField record."""
-        if datafileobjectfield.datafileobjectfieldid == -1:
-            return self._insert_datafileobjectfield(datafileobjectfield)
-        else:
-            return self._update_datafileobjectfield(datafileobjectfield)
-
+        existing_dfof = self.get_datafileobjectfield_by_objectid_and_ordinal(datafileobjectfield.datafileobjectid, datafileobjectfield.fieldordinal)
+        try:
+            if existing_dfof is None:
+                return self._insert_datafileobjectfield(datafileobjectfield)
+            else:
+                return self._update_datafileobjectfield(datafileobjectfield)
+        except:
+            #print(f"Error occurred while upserting datafileobjectfield: {datafileobjectfield.datafileobjectid} -- error ")
+            return None
+        
     def _insert_datafileobjectfield(self,obj: "DataFileObjectField") -> "DataFileObjectField":
         """Insert a new DataFileObjectField record."""
         sql = f"""
@@ -673,6 +734,7 @@ class DatabaseService(QObject):
         return None
 
     def _insert_datafileobject(self,obj: "DataFileObject") -> "DataFileObject":
+        """Inserts a new datafileobject record. Updates the stagingtablename with a padded ID after insertion."""
         sql = f"""
         INSERT INTO {self.datafileobjecttable}
         (datafileid, objecttype, objectname, stagingtableschema, stagingtablename, skipobject)
@@ -689,9 +751,16 @@ class DatabaseService(QObject):
         )
         row = self.execute_returning_one(sql, params)
         if row is not None and row["datafileobjectid"] is not None:
-            obj.datafileobjectid = row["datafileobjectid"]
-            self._datafileobjects_by_id[obj.datafileobjectid] = obj
-            self.datafileobject_cache_changed.emit()
+            datafileobjectid = row["datafileobjectid"]
+            obj.datafileobjectid = datafileobjectid
+            padded_id = str(datafileobjectid).zfill(8)
+            stagingname = obj.stagingtablename + "_" + padded_id
+            print(f'Generated staging table name: {stagingname}')
+            if obj.stagingtablename != stagingname:
+                print(f'Updating staging table name from {obj.stagingtablename} to {stagingname}')
+                obj.stagingtablename = stagingname
+                obj = self._update_datafileobject(obj)
+            self.add_datafileobjects_to_cache([obj])
             return obj
         return None
 
@@ -717,8 +786,7 @@ class DatabaseService(QObject):
         )
         row = self.execute_dml(sql, params)
         if row is not None and row > 0:
-            self._datafileobjects_by_id[obj.datafileobjectid] = obj
-            self.datafileobject_cache_changed.emit()
+            self.add_datafileobjects_to_cache([obj])
             return obj
         return None
     
@@ -742,6 +810,44 @@ class DatabaseService(QObject):
         params =[jobrunversionid, *exts]
         rows = self.execute_query(sql, params, fetchone=False)
         return rows
+
+    def refresh_job_cache(self) -> None:
+        """Re-query jobs and refresh the internal cache."""
+        if not self._connection:
+            self._jobs_by_id = {}
+            return
+
+        rows = self.execute_query(
+            f"SELECT jobid, jobname, schemaname, jobprefix, description, status, purpose, createdby, createddate, jobstartdate, jobcompletedate FROM {self.jobtable}"
+        )
+
+        self._jobs_by_id = {
+            row["jobid"]: Job.from_db_row(row)
+            for row in rows
+        }
+
+        print(f"Job Cache updated with {len(self._jobs_by_id)} jobs")
+
+        self.job_cache_changed.emit()
+
+    def refresh_jobrunversion_cache(self) -> None:
+        """Re-query job run versions and refresh the internal cache."""
+        if not self._connection:
+            self._jobrunversion_by_id = {}
+            return
+
+        rows = self.execute_query(
+            f"SELECT jobrunversionid, jobid, runversion, rundatetime FROM {self.jobrunversiontable}"
+        )
+
+        self._jobrunversion_by_id = {
+            row["jobrunversionid"]: JobRunVersion.from_db_row(row)
+            for row in rows
+        }
+
+        print(f"Job Run Version Cache updated with {len(self._jobrunversion_by_id)} entries")
+
+        self.jobrunversion_cache_changed.emit()
 
     def refresh_datafile_cache(self) -> None:
         """Re-query datafiles and refresh the internal cache."""
@@ -771,7 +877,7 @@ class DatabaseService(QObject):
     def get_datafile_by_id(self, datafile_id: int) -> DataFile | None:
         """Retrieve a datafile record by its ID."""
         return self._datafiles_by_id.get(datafile_id)
-    
+
     def refresh_jobfile_cache(self, jobrunversionid: int) -> None:
         """Re-query jobfiles and refresh the internal cache."""
         if not self._connection:
@@ -830,6 +936,59 @@ class DatabaseService(QObject):
 
         self.jobfolder_cache_changed.emit()
 
+    def refresh_datafileobject_cache(self) -> None:
+        """Re-query datafileobjects and refresh the internal cache."""
+        if not self._connection:
+            self._datafileobjects_by_id = {}
+            self._datafileobjects_by_name_and_fileid = {}
+            self.datafileobject_cache_changed.emit()
+            return
+
+        rows = self.execute_query(
+            f"""
+            SELECT datafileobjectid, datafileid, objecttype, objectname, stagingtableschema, stagingtablename, skipobject, skipmessage
+            FROM {self.datafileobjecttable}
+            """
+        )
+
+        self._datafileobjects_by_id = {
+            row["datafileobjectid"]: DataFileObject.from_db_row(row)
+            for row in rows
+        }
+
+        self._datafileobjects_by_name_and_fileid = {
+            (row["objectname"], row["datafileid"]): DataFileObject.from_db_row(row)
+            for row in rows
+        }
+
+        self.datafileobject_cache_changed.emit()
+
+    def refresh_datafileobjectfield_cache(self) -> None:
+        """Re-query datafileobjectfields and refresh the internal cache."""
+        if not self._connection:
+            self._datafileobjectfields_by_id = {}
+            self.datafileobjectfield_cache_changed.emit()
+            return
+
+        rows = self.execute_query(
+            f"""
+            SELECT datafileobjectfieldid, datafileobjectid, fieldordinal, fielddatatype, fieldlength, fieldprecision, skipfield, skipmessage
+            FROM {self.datafileobjectfieldtable}
+            """
+        )
+
+        self._datafileobjectfields_by_id = {
+            row["datafileobjectfieldid"]: DataFileObjectField.from_db_row(row)
+            for row in rows
+        }
+
+        self._datafileobjectfields_by_objectid_and_ordinal = {
+            (row["datafileobjectid"], row["fieldordinal"]): DataFileObjectField.from_db_row(row)
+            for row in rows
+        }
+
+        self.datafileobjectfield_cache_changed.emit()
+                                          
     def jobfile_exists(self,datafile_id: int,jobrunversion_id: int) -> bool:
         """Check if a jobfile with the given composite key already exists."""
         return (datafile_id, jobrunversion_id) in self._jobfiles_by_composite_key
@@ -847,18 +1006,37 @@ class DatabaseService(QObject):
     def get_jobfile_by_id(self, jobfile_id: int) -> JobFile | None:
         """Retrieve a jobfile by its ID."""
         return self._jobfiles_by_id.get(jobfile_id)
-    
+
+    def add_jobs_to_cache(self,jobs: list[Job]) -> None:
+        """Add or update jobs in the cache."""
+        for job in jobs:
+            self._jobs_by_id[job.jobid] = job
+
+        self.job_cache_changed.emit()
+
+    def add_jobrunversions_to_cache(self, runversions: list[JobRunVersion]) -> None:
+        """Add or update job run versions in the cache."""
+        for runversion in runversions:
+            self._jobrunversion_by_id[runversion.jobrunversionid] = runversion
+
+        self.jobrunversion_cache_changed.emit()
+
     def add_datafileobjects_to_cache(self,objects: list[DataFileObject] ) -> None:
         """Add or update datafileobjects in the cache."""
         for obj in objects:
             self._datafileobjects_by_id[obj.datafileobjectid] = obj
+            self._datafileobjects_by_name_and_fileid[(obj.objectname, obj.datafileid)] = obj  
 
         self.datafileobject_cache_changed.emit()
+
+    def get_datafileobject_by_name_and_fileid(self, name: str, datafileid: int) -> DataFileObject | None:
+        return self._datafileobjects_by_name_and_fileid.get((name, datafileid))
 
     def add_datafileobjectfields_to_cache(self,fields: list[DataFileObjectField]) -> None:
         """Add or update datafileobjectfields in the cache."""
         for field in fields:
             self._datafileobjectfields_by_id[field.datafileobjectfieldid] = field
+            self._datafileobjectfields_by_objectid_and_ordinal[(field.datafileobjectid, field.fieldordinal)] = field
 
         self.datafileobjectfield_cache_changed.emit()
 
@@ -893,6 +1071,19 @@ class DatabaseService(QObject):
             Result.append(newrunversion)
 
         return Result
+
+    def get_job_by_id(self, task_id: int) -> Job:   
+        """Retrieve a jobfile by its ID."""
+        return self._jobs_by_id.get(task_id)    
+
+    def get_jobrunversion_by_id(self, jobrunversionid: int) -> JobRunVersion:
+        """Retrieve a JobRunVersion by its ID."""
+        return self._jobrunversion_by_id.get(jobrunversionid)
+
+    def get_datafileobjectfield_by_objectid_and_ordinal(self,datafileobjectid: int, ordinal: int) -> DataFileObjectField:
+        """Return a DataFileObjectField object by its datafileobjectid and ordinal."""
+        return self._datafileobjectfields_by_objectid_and_ordinal.get((datafileobjectid, ordinal))   
+
 
     def normalize_path_key(self, pathlike) -> str:
         return str(Path(pathlike).resolve()).replace("\\", "/").rstrip("/").lower()

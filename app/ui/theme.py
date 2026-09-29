@@ -407,27 +407,6 @@ QTabBar::tab:selected {
 }
 
 /* Data grids, trees, and lists */
-QTreeWidget::item {
-    color: #322c3d;
-    background-color: #ffffff;
-    padding: 2px;
-    min-height: 23px;
-}
-
-QTreeWidget::item:hover {
-    background-color: #f0ede8;
-}
-
-QTreeWidget::item:selected {
-    background-color: #9b7fc2;
-    color: #ffffff;
-}
-
-QTreeWidget::item:first-column {
-    color: #0000ff;
-    background-color: #d3d3d3;
-}
-
 QTableWidget,
 QTableView,
 QTreeWidget,

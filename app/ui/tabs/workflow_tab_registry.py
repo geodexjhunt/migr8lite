@@ -15,7 +15,7 @@ from app.services.db_service import DatabaseService
 
 from app.ui.tabs.extract_tab import ExtractTab
 from app.ui.tabs.import_tab import ImportTab
-
+from app.ui.tabs.orig_view_tab import ViewOrig
     
 
 
@@ -72,12 +72,12 @@ WORKFLOW_TABS: list[WorkflowTabDefinition] = [
     WorkflowTabDefinition(
         phase=WorkflowPhase.EXTRACT,
         label="Extract",
-        factory=lambda context, config, db_service: ExtractTab(context=context, config=config, db_service=  db_service),
+        factory=ExtractTab
     ),
     WorkflowTabDefinition(
         phase=WorkflowPhase.VIEW_SOURCE,
         label="View Source",
-        factory=create_placeholder_tab("View Source"),
+        factory=ViewOrig,
     ),
     WorkflowTabDefinition(
         phase=WorkflowPhase.GENERATE_MAPPINGS,

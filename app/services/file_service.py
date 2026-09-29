@@ -144,7 +144,7 @@ def _open_access_connection(fp: Path):
 
     raise RuntimeError(f"Unable to open Access file '{fp}': {last_err}")
 
-def process_datafile(db_service: DatabaseService,fp: Path,datafileid: int, ftype: str,subtype: str, read_fileobjectfields: bool = True,) -> tuple[list[DataFileObject], list[DataFileObjectField]]:
+def process_datafile(db_service: DatabaseService,fp: Path,datafileid: int, ftype: str,subtype: str, read_fileobjectfields: bool = True, datafileobjecttemplate: DataFileObject | None = None) -> tuple[list[DataFileObject], list[DataFileObjectField]]:
     """
     Read all objects and optionally all fields from a datafile.
     Opens the file once and passes it to read methods.
@@ -154,6 +154,13 @@ def process_datafile(db_service: DatabaseService,fp: Path,datafileid: int, ftype
     datafileobjects = []
     fieldobjects = []
 
+    if datafileobjecttemplate is not None:
+        stagingtableschema = datafileobjecttemplate.stagingtableschema
+        stagingtablename = datafileobjecttemplate.stagingtablename
+    else:
+        stagingtableschema = ""
+        stagingtablename = ""   
+    
     try:
         if ftype == "excel":
             ext = fp.suffix.lower()
@@ -173,6 +180,9 @@ def process_datafile(db_service: DatabaseService,fp: Path,datafileid: int, ftype
                     datafileid=datafileid, 
                 )
                 for obj in datafileobjects:
+                    obj.stagingtableschema = stagingtableschema
+                    obj.stagingtablename = stagingtablename
+
                     saved_obj = db_service.upsert_datafileobject_row(obj)
                     if saved_obj is not None:
                         saved_objects.append(saved_obj)
@@ -198,6 +208,9 @@ def process_datafile(db_service: DatabaseService,fp: Path,datafileid: int, ftype
                     
                 )
                 for obj in datafileobjects:
+                    obj.stagingtableschema = stagingtableschema
+                    obj.stagingtablename = stagingtablename
+
                     saved_obj = db_service.upsert_datafileobject_row(obj)
                     if saved_obj is not None:
                         saved_objects.append(saved_obj)              
@@ -219,16 +232,19 @@ def process_datafile(db_service: DatabaseService,fp: Path,datafileid: int, ftype
                 
             )
             for obj in datafileobjects:
+                obj.stagingtableschema = stagingtableschema
+                obj.stagingtablename = stagingtablename
                 saved_obj = db_service.upsert_datafileobject_row(obj)
-                saved_objects.append(saved_obj)   
-                if read_fileobjectfields:
-                    fieldobjects = _read_text_fields(
-                        fp=fp,
-                        datafileobjectid=saved_obj.datafileobjectid,
-                    )
-                    for field in fieldobjects:
-                        saved_field = db_service.upsert_datafileobjectfield_row(field)
-                        saved_fields.append(saved_field)
+                if saved_obj is not None:
+                    saved_objects.append(saved_obj)   
+                    if read_fileobjectfields:
+                        fieldobjects = _read_text_fields(
+                            fp=fp,
+                            datafileobjectid=saved_obj.datafileobjectid,
+                        )
+                        for field in fieldobjects:
+                            saved_field = db_service.upsert_datafileobjectfield_row(field)
+                            saved_fields.append(saved_field)
         else:
             raise ValueError(
                 f"Unsupported file type: {ftype}"

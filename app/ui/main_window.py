@@ -1,6 +1,7 @@
 """Main application window."""
 
 from tokenize import group
+from typing import Dict, List
 
 from PyQt6.QtWidgets import QCheckBox, QDialog, QComboBox,QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTabWidget, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QTreeWidget, QTreeWidgetItem
 from PyQt6.QtGui import QBrush, QBrush, QColor, QIcon, QFont, QAction
@@ -25,16 +26,20 @@ class MainWindow(QMainWindow):
         app_config = config.app_config
         # Create shared context first - tabs will need it during construction
         self.context = MigrationContext(self)
+        
+        self._connect_database()
+        self._update_database_info_cache()
 
+        self.db_service.refresh_job_cache()
+        self.db_service.refresh_jobrunversion_cache()
         self.db_service.refresh_table_cache()
         self.db_service.refresh_datafile_cache()
+        self.db_service.refresh_datafileobject_cache()
+        self.db_service.refresh_datafileobjectfield_cache() 
 
         if self.context.current_jobrunversionid is not None:
             self.db_service.refresh_jobfolder_cache(self.context.current_jobrunversionid)
             self.db_service.refresh_jobfile_cache(self.context.current_jobrunversionid)
-
-        self._connect_database()
-        self._update_database_info_cache()
 
         self.setWindowTitle(app_config.get("title", "migr8lite"))
         self.icon = QIcon(app_config.get("window_icon", None))
@@ -167,9 +172,7 @@ class MainWindow(QMainWindow):
         tab_widget.addTab(self.data_explorer_tab, "Data Explorer")
 
         return tab_widget
-
-     
-
+    
     def _create_task_table_panel(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel) 
@@ -201,8 +204,11 @@ class MainWindow(QMainWindow):
         #print(f"DEBUG: jobfolder cache size = {len(self.db_service._jobfolders_by_id)}")
 
         try:
+            tables: List[Dict] = []
+            datafiles: dict[int, Dict] = {}
             tables = self.db_service.get_datafileobjects_for_task(task_id)
-          
+            datafiles = self.db_service.get_datafile_occurrence_number(task_id)
+            
             all_tables_info = self.context.all_tables_info  # renamed - don't shadow
             self.task_table_tree.clear()
 
@@ -213,6 +219,7 @@ class MainWindow(QMainWindow):
             for row in tables:
                 filename = row['filename']
                 folderid = row['folderid']
+                
                 #print(f"DEBUG: row folderid = {folderid!r} (type={type(folderid)})")
                 filename_dict.setdefault((folderid, filename), []).append(row)
 
@@ -228,14 +235,19 @@ class MainWindow(QMainWindow):
                         folder_item.setForeground(0, QBrush(QColor("blue")))
                         folder_item.setBackground(0, QBrush(QColor("lightgray")))
 
-            prevfolderid: int = -1            
+            prevfolderid: int = -1      
+            alldups: bool = True
             # Create tree structure
             for folderid, filename in sorted(filename_dict.keys()):
                 folder = self.db_service.get_jobfolder(folderid)
                 folderpath = folder.folderpath if folder else ""
+                fileid = filename_dict[(folderid, filename)][0]['jobfileid']
+                datafile_occurrence_number = datafiles[fileid]['occurrence_number'] if fileid in datafiles else 1
+                #print(f"DEBUG: fileid = {fileid}, datafile_occurrence_number = {datafile_occurrence_number}")
                 file_item = QTreeWidgetItem([f"{filename} -- {folderpath}"])
 
                 if group_by_file and folderid != prevfolderid:
+                    alldups = True
                     folder_item = QTreeWidgetItem([f"{folder.folderpath}"])
                     folder_item.setExpanded(True)
                     folder_item.setData(0, Qt.ItemDataRole.UserRole, folderid)
@@ -243,7 +255,12 @@ class MainWindow(QMainWindow):
                     #folder_item.setCheckState(0, Qt.CheckState.Unchecked)
                     folder_item.setForeground(0, QBrush(QColor("blue")))
                     folder_item.setBackground(0, QBrush(QColor("lightgray")))
-                    
+
+                if datafile_occurrence_number > 1:
+                    file_item.setForeground(0, QBrush(QColor("red")))
+                else:
+                    file_item.setForeground(0, QBrush(QColor("black")))
+                    alldups = False
 
                 prevfolderid = folderid
                 for table in sorted(
@@ -264,13 +281,15 @@ class MainWindow(QMainWindow):
                     )
 
                     item = QTreeWidgetItem(
-                        [f"{table['objectname']} {'✔' if imported else '✖'} {staging_name or '(no staging table)'}"]
+                        [f"{table['objectname']} {'✔' if imported else '✖'} [{staging_schema or '(no schema)'}].[{staging_name or '(no staging table)'}]"]
                     )
                     item.setData(0, Qt.ItemDataRole.UserRole, table)
                     file_item.addChild(item)
 
                 if group_by_file:
                     folder_item.addChild(file_item)
+                    if alldups:
+                        folder_item.setForeground(0, QBrush(QColor("red")))
                     self.task_table_tree.addTopLevelItem(folder_item)
                 else:
                     self.task_table_tree.addTopLevelItem(file_item)

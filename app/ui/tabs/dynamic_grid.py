@@ -84,6 +84,7 @@ class DynamicGrid(QTableWidget):
                 self.setItem(row_idx, col_idx, item)
         
         self.resizeColumnsToContents()
+
     def _on_cell_changed(self, item) -> None:
         """Track when cells are modified."""
         if item is not None:
@@ -200,3 +201,13 @@ class DynamicGrid(QTableWidget):
         """Handle dropdown selection change."""
         self.dirty_rows.add(row_idx)
         print(f"DEBUG [Grid]: Dropdown changed at row {row_idx}, col {col_idx}: {combo.currentData()}")
+
+    def clear_contents(self) -> None:
+        """Clear all contents of the grid."""
+        self.setRowCount(0)
+        self.original_row_data.clear()
+        self.dirty_rows.clear()
+        for row_idx in range(self.rowCount()):
+            for col_idx in range(self.columnCount()):
+                self.setCellWidget(row_idx, col_idx, None)
+        print("DEBUG [Grid]: Cleared all contents") 

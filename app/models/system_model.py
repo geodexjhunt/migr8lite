@@ -19,6 +19,37 @@ class WorkflowPhase(str, Enum):
     UPDATE_DATA = "k_update_data"
     REVIEW_ITERATE = "l_review_iterate"
 
+
+@dataclass
+class Job:
+    jobid: int
+    jobname: str
+    schemaname: str
+    jobprefix: str
+    description: str
+    status: str
+    purpose: str
+    createdby: str
+    createddate: Optional[datetime] = None
+    jobstartdate: Optional[datetime] = None
+    jobcompletedate: Optional[datetime] = None
+    @classmethod
+    def from_db_row(cls, row: dict[str, Any]) -> "Job":
+        """Construct a Job from a database result row."""
+        return cls(
+            jobid=row["jobid"],
+            jobname=row["jobname"],
+            schemaname=row["schemaname"],
+            jobprefix=row["jobprefix"],
+            description=row["description"],
+            status=row["status"],
+            purpose=row["purpose"],
+            createdby=row["createdby"],
+            createddate=row.get("createddate"),
+            jobstartdate=row.get("jobstartdate"),
+            jobcompletedate=row.get("jobcompletedate"),
+        )
+
 @dataclass
 class DataFile:
     datafileid: int
@@ -133,7 +164,20 @@ class DataFileObject:
             skipobject=row.get("skipobject"),
             skipmessage=row.get("skipmessagge"),
         )
-    
+    def has_same_content(self, other: "DataFileObject") -> bool:
+        """
+        Compare only the fields that matter for upsert logic.
+        """
+        return (
+
+            self.datafileid == other.datafileid
+            and self.objecttype == other.objecttype
+            and self.objectname == other.objectname
+            and self.stagingtableschema == other.stagingtableschema
+            and self.stagingtablename == other.stagingtablename
+            and self.skipobject == other.skipobject
+            and self.skipmessage == other.skipmessage
+        )
 @dataclass
 class DataFileObjectField:
     datafileobjectfieldid: int
