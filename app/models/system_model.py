@@ -223,6 +223,15 @@ class DataFileObjectFieldHeader:
             valuesanitised=row["valuesanitised"],
             timestamp=row["timestamp"],
         )
+    def has_same_content(self, other: "DataFileObjectFieldHeader") -> bool:
+        """Check if another DataFileObjectFieldHeader has the same content (excluding the ID)."""
+        return (
+            self.datafileobjectfieldid == other.datafileobjectfieldid and
+            self.headernum == other.headernum and
+            self.headervalue == other.headervalue and
+            self.sanitisedheadervalue == other.sanitisedheadervalue and
+            self.valuesanitised == other.valuesanitised 
+        )
 
 @dataclass
 class DataFileObjectHeaderRow:

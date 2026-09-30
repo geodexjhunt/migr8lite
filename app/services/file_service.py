@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import time
+from datetime import datetime
 from tkinter.font import names
 from typing import Any, Dict
 from arrow import ParserError
@@ -154,6 +155,7 @@ def process_datafile(db_service: DatabaseService,fp: Path,datafileid: int, ftype
     saved_fields: list[DataFileObjectField] = []
     datafileobjects = []
     fieldobjects = []
+    saved_headers = []
 
     if datafileobjecttemplate is not None:
         stagingtableschema = datafileobjecttemplate.stagingtableschema
@@ -295,7 +297,7 @@ def _read_excel_fields(excel_file: pd.ExcelFile,sheet_name: str, datafileobjecti
     fields = []
 
     try:
-        df = excel_file.parse(sheet_name = sheet_name, header=None, dype =str)  # Just read header
+        df = excel_file.parse(sheet_name = sheet_name, header=None, dtype =str)  # Just read header
         if df is not None:
             fields = get_fields_from_dataframe(df, datafileobjectid=datafileobjectid)
     except Exception as e:
@@ -316,7 +318,15 @@ def _read_excel_header_row(excel_file: pd.ExcelFile,sheet_name: str,datafileobje
     """
     
     # Get the header row number (default 1, or user-overridden value)
-    header_row_number = db_service.get_header_row_number(datafileobjectid) or 1
+    header_row_objects = db_service.get_datafileheaderrow_objects_by_datafileobjectid(datafileobjectid)
+
+    # iterate list of objects to find where headernum = 1   
+    for obj in header_row_objects:
+        if obj.headernum == 1:
+            header_row_objects.insert(0, header_row_objects.pop(header_row_objects.index(obj)))
+            break
+
+    header_row_number = header_row_objects[0].headernum if header_row_objects else 1
     
     # Read the sheet with no header assumption
     df = excel_file.parse(sheet_name=sheet_name, header=None, dtype=str)
@@ -335,14 +345,21 @@ def _read_excel_header_row(excel_file: pd.ExcelFile,sheet_name: str,datafileobje
     
     # Build DataFileObjectFieldHeader objects for persistence
     mappings = []
+
     for ordinal, field_info in header_dict.items():
+
+        field = db_service.get_datafileobjectfield_by_ordinal(datafileobjectid, ordinal)
+        fieldid = field.datafileobjectfieldid
+        orig = field_info["OrigFieldName"]
+        new = field_info["SanitizedFieldName"]
+        sanit = False if orig == new else True
         mapping = DataFileObjectFieldHeader(
             datafileobjectfieldheaderid=-1,
-            datafileobjectid=datafileobjectid,
-            ordinal_position=ordinal,
-            original_field_name=field_info["OrigFieldName"],
-            sanitized_field_name=field_info["SanitizedFieldName"],
-            header_row_number=header_row_number,
+            datafileobjectfieldid=fieldid,
+            headervalue=orig,
+            sanitisedheadervalue=new,
+            valuesanitised=sanit,
+            timestamp=datetime.now(),
         )
         mappings.append(mapping)
     
