@@ -203,6 +203,47 @@ class DataFileObjectField:
         )   
 
 @dataclass
+class DataFileObjectFieldHeader:
+    datafileobjectfieldheaderid: int
+    datafileobjectfieldid: int
+    headernum: int
+    headervalue: str
+    sanitisedheadervalue: str
+    valuesanitised: bool
+    timestamp: datetime
+    @classmethod
+    def from_db_row(cls,row: dict[str, Any]) -> "DataFileObjectFieldHeader":
+        """Construct a DataFileObjectFieldHeader from a database result row."""
+        return cls(
+            datafileobjectfieldheaderid=row["datafileobjectfieldheaderid"],
+            datafileobjectfieldid=row["datafileobjectfieldid"],
+            headernum=row["headernum"],
+            headervalue=row["headervalue"],
+            sanitisedheadervalue=row["sanitisedheadervalue"],
+            valuesanitised=row["valuesanitised"],
+            timestamp=row["timestamp"],
+        )
+
+@dataclass
+class DataFileObjectHeaderRow:
+    datafileobjectheaderrowid: int
+    datafileobjectid: int
+    headernumber: int
+    rownumber: int
+    timestamp: datetime
+    @classmethod
+    def from_db_row(cls, row: dict[str, Any]) -> "DataFileObjectHeaderRow":
+        """Construct a DataFileObjectHeaderRow from a database result row."""
+        return cls(
+            datafileobjectheaderrowid=row["datafileobjectheaderrowid"],
+            datafileobjectid=row["datafileobjectid"],
+            headernumber=row["headernumber"],
+            rownumber=row["rownumber"],
+            timestamp=row["timestamp"],
+        )
+
+
+@dataclass
 class SystemTableRegistry:
     sql_table: str
     label: str

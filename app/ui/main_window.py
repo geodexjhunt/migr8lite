@@ -308,7 +308,6 @@ class MainWindow(QMainWindow):
         self.db_service.refresh_jobfolder_cache(jobrunversion_id)
         self.db_service.refresh_jobfile_cache(jobrunversion_id)      
 
-
     def _on_migration_task_changed(self) -> None:
         """When migration task changes, notify context."""
         task_id = self.migration_task_combo.currentData()
@@ -411,7 +410,6 @@ class MainWindow(QMainWindow):
                     self.jobrunversion_combo.addItem(f"{jobrunversion.runversion}", jobrunversion.jobrunversionid)
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to refresh job run version list: {e}")
-
 
     def _select_task_in_combo(self, task_id: int) -> None:
         """Select a task in the combo box by its ID."""

@@ -1,0 +1,136 @@
+ def load_file_to_dataframe(self,file_path: Path, drop_all_null_columns: bool = True, log_fn=None) -> pd.DataFrame:
+        """
+        Basic parser:
+        - .csv => read_csv
+        - .tsv/.txt => read_csv with inferred sep (python engine, sep=None)
+        - .xlsx/.xls => read_excel ## we don't do this anymore in this method
+        """
+        operable = self.get_operable_filetypes()
+        ext_path = file_path.suffix.lower().lstrip(".")
+        meta = operable.get(ext_path)
+        if not meta:
+            raise ValueError(f"Unsupported extension for parser: {ext_path}")
+            return
+        
+        ftype = (meta.get("type") or "").lower()
+        subtype = (meta.get("subtype") or "").lower()
+
+        try:
+            if ftype == "text" and subtype == "csv":
+                df, used_enc = self.read_csv_with_fallback(file_path, dtype=str, keep_default_na=True)
+            elif ftype == "text" and subtype is None:
+                df, used_enc = self.read_csv_with_fallback(file_path, dtype=str, sep=None, engine="python", keep_default_na=True)
+            elif ftype == "excel":
+                df = pd.read_excel(file_path, dtype=str)
+                used_enc = None
+            else:
+                raise ValueError(f"Unsupported extension for parser: {ext_path}")
+        except ParserError:
+            df, used_enc = self.read_text_lines_fallback(file_path)
+            if log_fn:
+                log_fn(f"⚠️ CSV parse failed; loaded as single-column text lines: {file_path.name}")
+
+
+        if ftype == "text" and df is not None:
+            if log_fn:
+                log_fn(f"ℹ️ Text read using encoding={used_enc}: {file_path.name}")
+
+
+        # normalize blank strings -> NA (so whitespace-only cells count as null)
+        df = df.replace(r"^\s*$", pd.NA, regex=True)
+
+        # Sanitize/uniquify columns
+        seen = {}
+        new_cols = []
+        for i, c in enumerate(df.columns, start=1):
+            base = self.sanitize_column_name(c, i)
+            if base in seen:
+                seen[base] += 1
+                name = f"{base}_{seen[base]}"
+            else:
+                seen[base] = 1
+                name = base
+            new_cols.append(name)
+        df.columns = new_cols
+
+        if drop_all_null_columns:
+            # drop columns that are entirely null
+            all_null_cols = [c for c in df.columns if df[c].isna().all()]
+            if all_null_cols:
+                df = df.drop(columns=all_null_cols)
+
+
+        return df
+
+    def read_csv_with_fallback(self,path, **kwargs):
+        encodings = ["utf-8-sig", "utf-8", "cp1252", "latin-1"]
+        last_err = None
+        for enc in encodings:
+            try:
+                return pd.read_csv(path, encoding=enc, **kwargs), enc
+            except UnicodeDecodeError as e:
+                last_err = e
+        raise last_err
+
+    def read_text_lines_fallback(self,path):
+        encodings = ["utf-8-sig", "utf-8", "cp1252", "latin-1"]
+        last_err = None
+        for enc in encodings:
+            try:
+                with open(path, "r", encoding=enc, errors="strict") as f:
+                    lines = [ln.rstrip("\n\r") for ln in f]
+                df = pd.DataFrame({"LineText": lines})
+                return df, enc
+            except UnicodeDecodeError as e:
+                last_err = e
+        raise last_err
+
+   
+
+     def parse_extensions(self, value) -> list[str]:
+        """
+        Accepts:
+        - '.csv'
+        - '.csv,.xlsx,.accdb'
+        - 'csv, xlsx, accdb'
+        - list input
+        Returns normalized list like ['.csv', '.xlsx', '.accdb'].
+        """
+        if value is None:
+            return []
+
+        if isinstance(value, list):
+            raw_items = value
+        else:
+            raw_items = str(value).split(",")
+
+        out = []
+        seen = set()
+        for item in raw_items:
+            ext = str(item).strip().lower()
+            if not ext:
+                continue
+            if not ext.startswith("."):
+                ext = "." + ext
+            if ext not in seen:
+                seen.add(ext)
+                out.append(ext)
+
+        return out
+
+
+    def get_object_exceptions(self) -> set[str]:
+        s = self.settings
+        raw = s.get("object_exceptions", [])
+        if not isinstance(raw, list):
+            return set()
+        return {str(x).strip().lower() for x in raw if str(x).strip()}
+
+
+    def infer_dataframe_sql_types(self,df: pd.DataFrame, date_format_label: str = "Auto") -> Dict[str, str]:
+        out: Dict[int, Dict[str, Any]] = {}
+        for i, col in enumerate(df.columns, start=1):
+            out[i] = self.infer_series_type(df.iloc[:, i - 1], date_format_label=date_format_label)
+        return out
+
+

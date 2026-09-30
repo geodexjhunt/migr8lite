@@ -7,7 +7,7 @@ import pyodbc
 from pathlib import Path
 
 
-from app.models.system_model import DataFileObject, DataFile, DataFileObjectField, JobFile, JobFolder, JobRunVersion, Job
+from app.models.system_model import DataFileObject, DataFile, DataFileObjectField, JobFile, JobFolder, JobRunVersion, Job, DataFileObjectFieldHeader, DataFileObjectHeaderRow   
 from config.config import Config
 from PyQt6.QtCore import pyqtSignal, QObject
 
@@ -24,6 +24,7 @@ class DatabaseService(QObject):
     jobfolder_cache_changed = pyqtSignal()
     importtab_log_append = pyqtSignal(str)    
     jobrunversion_cache_changed = pyqtSignal()
+    datafileobjectfieldheaders_cache_changed = pyqtSignal()
 
     def __init__(self, config: Config):
         super().__init__()
@@ -63,6 +64,13 @@ class DatabaseService(QObject):
         self._datafileobjectfields_by_id: dict[int, DataFileObjectField] = {}
         self._datafileobjectfields_by_objectid_and_ordinal: dict[tuple[int, int], DataFileObjectField] = {}
 
+        # Datafile object field header caching
+        self._datafileobjectfieldheaders_by_id: dict[int, DataFileObjectFieldHeader] = {}
+
+        # Datafile object header row caching
+        self._datafileobjectheaderrows_by_id: dict[int, DataFileObjectHeaderRow] = {}
+        self._datafileobjectheaderrows_by_datafileobjectid_and_headernum: dict[tuple[int, int], DataFileObjectHeaderRow] = {}
+
         ## tables are stored as schema.tablename 
         ## to be able to wrap them in square brackets we need to insert square brackets around the period
         ## that logic has been moved to the get function of the config property
@@ -73,6 +81,8 @@ class DatabaseService(QObject):
         self.jobrunversiontable = config.system_management_config.get("jobrunversion_table")
         self.jobfolderstable = config.system_management_config.get("jobfolders_table")
         self.datafileobjectfieldtable = config.system_management_config.get("datafileobjectfield_table")
+        self.datafileobjectfieldheadertable = config.system_management_config.get("datafileobjectheader_table")
+        self.datafileobjectheaderrowtable = config.system_management_config.get("datafileobjectheaderrow_table")
 
     def build_connection_string(self) -> str:
         db_config = self.config.database_config
@@ -988,7 +998,28 @@ class DatabaseService(QObject):
         }
 
         self.datafileobjectfield_cache_changed.emit()
-                                          
+
+    def refresh_datafileobjectfieldheader_cache(self) -> None:
+        """Re-query the datafileobjectfieldheader and refresh the internal cache."""
+        if not self._connection:
+            self._datafileobjectfieldheader_by_id = {}
+            self.datafileobjectfieldheaders_cache_changed.emit()
+            return  
+        
+        rows = self.execute_query(
+            f"""
+            SELECT datafileobjectfieldheaderid, datafileobjectfieldid, headernum, headervalue, sanitisedheadervalue, valuesanitised, timestamp
+            FROM {self.datafileobjectfieldheadertable}
+            """
+        )
+
+        self._datafileobjectfieldheader_by_id = {
+            row["datafileobjectfieldheaderid"]: DataFileObjectFieldHeader.from_db_row(row)
+            for row in rows
+        }
+
+        self.datafileobjectfieldheader_cache_changed.emit()
+
     def jobfile_exists(self,datafile_id: int,jobrunversion_id: int) -> bool:
         """Check if a jobfile with the given composite key already exists."""
         return (datafile_id, jobrunversion_id) in self._jobfiles_by_composite_key
@@ -1104,6 +1135,3 @@ class DatabaseService(QObject):
     @property
     def user_defined_schemas(self) -> List[Dict]:
         return self._user_defined_schemas
-
-############# End of Class
-

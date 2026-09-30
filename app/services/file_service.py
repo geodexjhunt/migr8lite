@@ -8,13 +8,14 @@ import os
 from pathlib import Path
 import re
 import time
+from tkinter.font import names
 from typing import Any, Dict
 from arrow import ParserError
 import pandas as pd 
-from app.models.system_model import DataFile, DataFileObject, DataFileObjectField
+from app.models.system_model import DataFile, DataFileObject, DataFileObjectField,DataFileObjectFieldHeader,DataFileObjectHeaderRow
 from app.services.db_service import DatabaseService
 import pyodbc
-from app.constants import DEFAULT_SETTINGS
+from app.constants import DEFAULT_SETTINGS, SQLSERVER_MAX_IDENTIFIER_LEN
 
 
 def get_file_counts(initial_folders: list[Path]) -> tuple[dict[str, int], list[str]]:
@@ -197,6 +198,19 @@ def process_datafile(db_service: DatabaseService,fp: Path,datafileid: int, ftype
                                 saved_field = db_service.upsert_datafileobjectfield_row(field)
                                 if saved_field is not None:
                                     saved_fields.append(saved_field)
+                            # NEW: Read and persist header row mapping AFTER fields are saved
+                            header_row_mapping = _read_excel_header_row(
+                                excel_file=excel_file,
+                                sheet_name=obj.objectname,
+                                datafileobjectid=saved_obj.datafileobjectid,
+                                db_service=db_service,
+                            )
+                            if header_row_mapping:
+                                for mapping in header_row_mapping:
+                                    saved_mapping = db_service.upsert_datafileobjectfieldheader_row(mapping)
+                                    if saved_mapping is not None:
+                                        saved_headers.append(saved_mapping)
+
 
         elif ftype == "database" and subtype == "access":
 
@@ -281,7 +295,7 @@ def _read_excel_fields(excel_file: pd.ExcelFile,sheet_name: str, datafileobjecti
     fields = []
 
     try:
-        df = excel_file.parse(sheet_name)  # Just read header
+        df = excel_file.parse(sheet_name = sheet_name, header=None, dype =str)  # Just read header
         if df is not None:
             fields = get_fields_from_dataframe(df, datafileobjectid=datafileobjectid)
     except Exception as e:
@@ -290,6 +304,50 @@ def _read_excel_fields(excel_file: pd.ExcelFile,sheet_name: str, datafileobjecti
         )
 
     return fields
+
+def _read_excel_header_row(excel_file: pd.ExcelFile,sheet_name: str,datafileobjectid: int,db_service: "DatabaseService") -> list[DataFileObjectFieldHeader]:
+    """
+    Read the header row for a sheet and map column ordinals to field names.
+    
+    - Queries DB to get the current header_row_number (defaults to 1 if not set)
+    - Reads that row from the sheet
+    - Generates sanitized names and de-duplication
+    - Returns list of DataFileObjectFieldHeader objects ready to persist
+    """
+    
+    # Get the header row number (default 1, or user-overridden value)
+    header_row_number = db_service.get_header_row_number(datafileobjectid) or 1
+    
+    # Read the sheet with no header assumption
+    df = excel_file.parse(sheet_name=sheet_name, header=None, dtype=str)
+    
+    # Extract the header row (convert 1-indexed to 0-indexed)
+    header_row_values = df.iloc[header_row_number - 1].tolist()
+    
+    # Convert to ordinal-keyed dict for generate_column_names
+    header_dict: Dict[int, Dict] = {
+        i: {"OrigFieldName": val}
+        for i, val in enumerate(header_row_values)
+    }
+    
+    # Generate sanitized + de-duped names
+    header_dict = generate_column_names(header_dict)
+    
+    # Build DataFileObjectFieldHeader objects for persistence
+    mappings = []
+    for ordinal, field_info in header_dict.items():
+        mapping = DataFileObjectFieldHeader(
+            datafileobjectfieldheaderid=-1,
+            datafileobjectid=datafileobjectid,
+            ordinal_position=ordinal,
+            original_field_name=field_info["OrigFieldName"],
+            sanitized_field_name=field_info["SanitizedFieldName"],
+            header_row_number=header_row_number,
+        )
+        mappings.append(mapping)
+    
+    return mappings
+
 
 def _read_access_objects(connection: pyodbc.Connection,datafileid: int) -> list[DataFileObject]:
     """Read table names from an already-open Access connection."""
@@ -529,9 +587,9 @@ def load_text_file_to_dataframe(file_path: Path, drop_all_null_columns: bool = T
 
     try:
         if ftype == "text" and subtype == "csv":
-            df, used_enc = read_csv_with_fallback(file_path, dtype=str, keep_default_na=True)
+            df, used_enc = read_csv_with_fallback(file_path, dtype=str, keep_default_na=True, header=None)
         elif ftype == "text":
-            df, used_enc = read_csv_with_fallback(file_path, dtype=str, sep=None, engine="python", keep_default_na=True)
+            df, used_enc = read_csv_with_fallback(file_path, dtype=str, sep=None, engine="python", keep_default_na=True, header=None)
         else:
             raise ValueError(f"Unsupported extension for parser: {ext_path}")
     except ParserError:
@@ -597,12 +655,12 @@ def read_text_lines_fallback(path):
 def sanitize_column_name(col: str, fallback_idx: int) -> str:
     c = str(col).strip()
     if not c:
-        c = f"column_{fallback_idx}"
+        c = f"UnkCol_{fallback_idx}"
     c = c.replace(" ", "_")
     c = re.sub(r"[^A-Za-z0-9_]", "_", c)
     c = re.sub(r"_+", "_", c).strip("_")
     if not c:
-        c = f"column_{fallback_idx}"
+        c = f"UnkCol_{fallback_idx}"
     return c
 
 def get_operable_filetypes() -> Dict[str, dict]:
@@ -623,3 +681,119 @@ def get_operable_filetypes() -> Dict[str, dict]:
             "subtype": meta.get("subtype"),
         }
     return out
+
+
+############# Methods below this line added for extraction
+def generate_column_names(header_values: Dict[int, Dict]) -> Dict[int, Dict]:
+    """
+    Shared logic: turn a raw header row into clean column names.
+    - Pass 1: Sanitize all values (fill nulls, remove special chars)
+    - Pass 2: De-duplicate by appending _occurrence_number, ensuring no collisions
+
+    header_values is keyed by ordinal column position, each value a dict containing
+    at least "OrigFieldName". This function adds "SanitizedFieldName" to each dict.
+    """
+    # Pass 1: Sanitize all values
+    unknown_counter = 0
+
+    for i, fieldnames in header_values.items():
+        val = fieldnames.get("OrigFieldName")
+        if not val or (isinstance(val, str) and val.strip() == ""):
+            unknown_counter += 1
+
+        sanitized = sanitize_column_name(val, unknown_counter)
+        header_values[i]["SanitizedFieldName"] = sanitized  # preserve OrigFieldName
+
+    # Pass 2: De-duplicate with occurrence numbering
+    occurrence_count: dict[str, int] = {}
+    all_sanitized_lower: set[str] = {
+        v["SanitizedFieldName"].lower() for v in header_values.values()
+    }  # snapshot from pass 1 — computed once, not rebuilt every iteration
+    assigned_names_lower: set[str] = set()
+
+    for i, fieldnames in header_values.items():
+        sanitized = fieldnames["SanitizedFieldName"]
+        sanitized_lower = sanitized.lower()
+
+        occurrence_count[sanitized_lower] = occurrence_count.get(sanitized_lower, 0) + 1
+        occurrence_num = occurrence_count[sanitized_lower]
+
+        if occurrence_num > 1:
+            candidate = f"{sanitized}_{occurrence_num}"
+            while candidate.lower() in all_sanitized_lower or candidate.lower() in assigned_names_lower:
+                occurrence_num += 1
+                candidate = f"{sanitized}_{occurrence_num}"
+            final_name = candidate
+        else:
+            final_name = sanitized
+
+        header_values[i]["SanitizedFieldName"] = final_name
+        assigned_names_lower.add(final_name.lower())
+
+    return header_values
+
+def prepare_dataframe_for_insert(df: pd.DataFrame, col_types: Dict[str, str], date_format_label: str = "Auto") -> pd.DataFrame:
+    out = df.copy()
+    fmt = selected_date_format_to_strptime(date_format_label)
+
+    for col, sql_type in col_types.items():
+        if col not in out.columns:
+            continue
+
+        s = out[col]
+
+        if sql_type == "DATE":
+            dt = parse_dates_with_order(s.dropna(), fmt)
+            # re-align to full index
+            parsed = pd.Series(index=s.index, dtype="object")
+            parsed.loc[s.dropna().index] = dt.dt.date
+            out[col] = parsed.where(parsed.notna(), None)
+
+        elif sql_type == "DATETIME2":
+            dt = parse_dates_with_order(s.dropna(), fmt)
+            parsed = pd.Series(index=s.index, dtype="object")
+            parsed.loc[s.dropna().index] = dt.dt.to_pydatetime()
+            out[col] = parsed.where(parsed.notna(), None)
+
+        elif sql_type in ("BIGINT",):
+            out[col] = pd.to_numeric(s, errors="coerce").astype("Int64").where(lambda x: x.notna(), None)
+
+        elif sql_type in ("FLOAT",):
+            out[col] = pd.to_numeric(s, errors="coerce").where(lambda x: x.notna(), None)
+
+        else:
+            # VARCHAR etc.
+            out[col] = s.where(pd.notna(s), None)
+
+    return out
+
+def sql_safe_header(name: str, max_len: int = 128) -> str:
+    # example policy; adjust to your rules
+    s = (name or "").strip()
+    if not s:
+        s = "Column"
+    s = s.replace("\x00", "")
+    s = s.replace("[", "(").replace("]", ")")
+    s = s[:max_len]
+    return s
+
+def json_default(self,o):
+    if isinstance(o, (datetime, date)):
+        return o.isoformat()
+    return str(o)  # safe fallback
+
+
+def safe_text(self, v):
+    if v is None:
+        return None
+    if isinstance(v, bytes):
+        for enc in ("utf-8", "cp1252", "latin-1"):
+            try:
+                return v.decode(enc)
+            except UnicodeDecodeError:
+                pass
+        return v.decode("utf-8", errors="replace")
+    try:
+        return str(v)
+    except Exception:
+        return repr(v)
