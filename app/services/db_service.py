@@ -652,37 +652,6 @@ class DatabaseService(QObject):
             self.jobfile_cache_changed.emit()
             return jobfile
         return None
-
-    def upsert_datafileobject_row(self,datafileobject: "DataFileObject") -> "DataFileObject":
-        """Insert or update a DataFileObject record."""
-
-        existing_df = self.get_datafileobject_by_name_and_fileid(datafileobject.objectname, datafileobject.datafileid)
-
-        try:
-            if existing_df is None:
-                print(f"Inserting datafileobject: {datafileobject.datafileid} :: {datafileobject.datafileobjectid} :: {datafileobject.objectname}")
-                return self._insert_datafileobject(datafileobject)
-            else:
-                ## Equalise the staging details as these are predicated on the current job details
-                ## the schema passed down in datafileobject will be correct so needs updating.
-                ## the prefix passed down in datafileobject will be correct so can be used in the tablename
-                ## the tablename will need checking against the datafileid and correcting if either part has changed
-                padded_id = str(existing_df.datafileobjectid).zfill(8)
-                stagingname = datafileobject.stagingtablename + "_" + padded_id
-                datafileobject.stagingtablename = stagingname
-
-                if existing_df.has_same_content(datafileobject):
-                    print(f"No changes detected for datafileobject: {datafileobject.datafileid} :: {existing_df.datafileobjectid} :: {datafileobject.objectname}")
-                    return existing_df
-                else:
-                    print(f"Updating datafileobject: {datafileobject.datafileid} :: {existing_df.datafileobjectid} :: {datafileobject.objectname}")
-                    # Ensure the print statement is executed before returning the updated object   
-                    datafileobject.datafileobjectid = existing_df.datafileobjectid 
-                    return self._update_datafileobject(datafileobject)
-                
-        except Exception as e:
-            print(f"Error occurred while upserting datafileobject: {datafileobject.datafileid} :: {datafileobject.datafileobjectid} :: {datafileobject.objectname}  ::  error {e}")
-            return None
         
     def upsert_datafileobjectfield_row(self, datafileobjectfield: "DataFileObjectField") -> "DataFileObjectField":
         """Insert or update a DataFileObjectField record."""
@@ -745,6 +714,40 @@ class DatabaseService(QObject):
             return obj
         return None
 
+    def upsert_datafileobject_row(self,datafileobject: "DataFileObject") -> tuple["DataFileObject", bool | None]:
+        """Insert or update a DataFileObject record.
+
+        Returns a tuple of the DataFileObject and a boolean indicating whether it was inserted (True), updated (False), or None if no changes were made.
+        """
+
+        existing_df = self.get_datafileobject_by_name_and_fileid(datafileobject.objectname, datafileobject.datafileid)
+
+        try:
+            if existing_df is None:
+                print(f"Inserting datafileobject: {datafileobject.datafileid} :: {datafileobject.datafileobjectid} :: {datafileobject.objectname}")
+                return self._insert_datafileobject(datafileobject), True
+            else:
+                ## Equalise the staging details as these are predicated on the current job details
+                ## the schema passed down in datafileobject will be correct so needs updating.
+                ## the prefix passed down in datafileobject will be correct so can be used in the tablename
+                ## the tablename will need checking against the datafileid and correcting if either part has changed
+                padded_id = str(existing_df.datafileobjectid).zfill(8)
+                stagingname = datafileobject.stagingtablename + "_" + padded_id
+                datafileobject.stagingtablename = stagingname
+
+                if existing_df.has_same_content(datafileobject):
+                    print(f"No changes detected for datafileobject: {datafileobject.datafileid} :: {existing_df.datafileobjectid} :: {datafileobject.objectname}")
+                    return existing_df, None
+                else:
+                    print(f"Updating datafileobject: {datafileobject.datafileid} :: {existing_df.datafileobjectid} :: {datafileobject.objectname}")
+                    # Ensure the print statement is executed before returning the updated object   
+                    datafileobject.datafileobjectid = existing_df.datafileobjectid 
+                    return self._update_datafileobject(datafileobject), False
+                
+        except Exception as e:
+            print(f"Error occurred while upserting datafileobject: {datafileobject.datafileid} :: {datafileobject.datafileobjectid} :: {datafileobject.objectname}  ::  error {e}")
+            return None, None
+
     def _insert_datafileobject(self,obj: "DataFileObject") -> "DataFileObject":
         """Inserts a new datafileobject record. Updates the stagingtablename with a padded ID after insertion."""
         sql = f"""
@@ -802,7 +805,7 @@ class DatabaseService(QObject):
             return obj
         return None
 
-    def upsert_datafileobjectfieldheader_row(self, obj: "DataFileObjectFieldHeaderRow") -> "DataFileObjectFieldHeaderRow" | None:
+    def upsert_datafileobjectfieldheader_row(self, obj: "DataFileObjectFieldHeader") -> "DataFileObjectFieldHeader" | None:
         """Insert or update a DataFileObjectFieldHeader record."""
         existing_dfof = self.get_datafileobjectfieldheader_by_fieldid_and_headernum(obj.datafileobjectfieldid, obj.headernum)
         try:
@@ -818,7 +821,7 @@ class DatabaseService(QObject):
             #print(f"Error occurred while upserting datafileobjectfieldheader: {obj.datafileobjectfieldid} -- error ")
             return None
 
-    def _insert_datafileobjectfieldheader(self, obj: "DataFileObjectFieldHeaderRow") -> "DataFileObjectFieldHeaderRow" | None:
+    def _insert_datafileobjectfieldheader(self, obj: "DataFileObjectFieldHeader") -> "DataFileObjectFieldHeader" | None:
                 
         sql = f"""
         INSERT INTO {self.datafileobjectfieldheaderrowtable} (datafileobjectfieldid, headernum, headervalue, sanitisedheadervalue, valuesanitised, timestamp)
@@ -840,7 +843,7 @@ class DatabaseService(QObject):
             return obj
         return None
 
-    def _update_datafileobjectfieldheader(self, obj: "DataFileObjectFieldHeaderRow") -> "DataFileObjectFieldHeaderRow" | None:
+    def _update_datafileobjectfieldheader(self, obj: "DataFileObjectFieldHeader") -> "DataFileObjectFieldHeader" | None:
         sql = f"""
         UPDATE {self.datafileobjectfieldheaderrowtable}
         SET datafileobjectfieldid = ?, headernum = ?, headervalue = ?, sanitisedheadervalue = ?, valuesanitised = ?, timestamp = ?
@@ -858,6 +861,59 @@ class DatabaseService(QObject):
         row = self.execute_returning_one(sql, params)
         if row is not None and row > 0:
             self.add_datafileobjectfieldheaders_to_cache(obj)
+            return obj
+        return None
+
+    def upsert_datafileobjectheaderrow_row(self, obj: "DataFileObjectHeaderRow") -> "DataFileObjectHeaderRow" | None:
+        
+        existing_obj = self.get_datafileheaderrow_object_by_datafileobjectid_and_headernum(obj.datafileobjectid, obj.headernum)
+        try:
+            if existing_obj is None:
+                return self._insert_datafileobjectheaderrow(obj)
+            else:
+                obj.datafileobjectheaderrowid = existing_obj.datafileobjectheaderrowid
+                if existing_obj.has_same_content(obj):
+                    return existing_obj
+                else:
+                    return self._update_datafileobjectheaderrow(obj)
+        except:
+            #print(f"Error occurred while upserting datafileobjectfieldheader: {obj.datafileobjectfieldid} -- error ")
+            return None
+
+    def _insert_datafileobjectheaderrow(self, obj: "DataFileObjectHeaderRow") -> "DataFileObjectHeaderRow" | None:
+        sql = f"""
+        INSERT INTO {self.datafileobjectheaderrowtable} (datafileobjectid, headernum, rownumber, timestamp)
+        OUTPUT INSERTED.datafileobjectheaderrowid
+        VALUES (?, ?, ?, ?)
+        """
+        params = (
+            obj.datafileobjectid,
+            obj.headernum,
+            obj.rownumber,
+            obj.timestamp,
+        )
+        row = self.execute_returning_one(sql, params)
+        if row is not None and row > 0:
+            obj.datafileobjectheaderrowid = row
+            self.add_datafileobjectheaderrows_to_cache(obj)
+            return obj
+        return None
+
+    def _update_datafileobjectheaderrow(self, obj: "DataFileObjectHeaderRow") -> "DataFileObjectHeaderRow" | None:
+        sql = f"""
+        UPDATE {self.datafileobjectheaderrowtable}
+        SET headernum = ?, rownumber = ?, timestamp = ?
+        WHERE datafileobjectheaderrowid = ?
+        """
+        params = (
+            obj.headernum,
+            obj.rownumber,
+            obj.timestamp,
+            obj.datafileobjectheaderrowid,
+        )
+        row = self.execute_dml(sql, params)
+        if row is not None and row > 0:
+            self.add_datafileobjectheaderrows_to_cache(obj)
             return obj
         return None
     

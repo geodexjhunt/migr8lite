@@ -134,3 +134,139 @@
         return out
 
 
+def process_datafile(db_service: DatabaseService,fp: Path,datafileid: int, ftype: str,subtype: str, read_fileobjectfields: bool = True, datafileobjecttemplate: DataFileObject | None = None) -> tuple[list[DataFileObject], list[DataFileObjectField]]:
+    """
+    Read all objects and optionally all fields from a datafile.
+    Opens the file once and passes it to read methods.
+    """
+    saved_objects: list[DataFileObject] = []
+    saved_fields: list[DataFileObjectField] = []
+    datafileobjects = []
+    fieldobjects = []
+    saved_headers = []
+
+    if datafileobjecttemplate is not None:
+        stagingtableschema = datafileobjecttemplate.stagingtableschema
+        stagingtablename = datafileobjecttemplate.stagingtablename
+    else:
+        stagingtableschema = ""
+        stagingtablename = ""   
+    
+    try:
+        if ftype == "excel":
+            ext = fp.suffix.lower()
+            if ext == ".xls":
+                engine = "xlrd"
+            elif ext in (".xlsx", ".xlsm", ".xltx", ".xltm"):
+                engine = "openpyxl"
+            elif ext == ".xlsb":
+                engine = "pyxlsb"
+            else:
+                print(f"⚠️ Unsupported Excel extension for {fp.name}: {ext}")
+                return [], []
+
+            with pd.ExcelFile(fp, engine=engine) as excel_file:
+                datafileobjects = _read_excel_objects(
+                    excel_file=excel_file,
+                    datafileid=datafileid, 
+                )
+                for obj in datafileobjects:
+                    obj.stagingtableschema = stagingtableschema
+                    obj.stagingtablename = stagingtablename
+
+                    saved_obj, inserted = db_service.upsert_datafileobject_row(obj)
+                    if saved_obj is not None:
+                        saved_objects.append(saved_obj)
+
+                        if read_fileobjectfields:
+                            fieldobjects = _read_excel_fields(
+                                excel_file=excel_file,
+                                sheet_name=obj.objectname,
+                                datafileobjectid=saved_obj.datafileobjectid,
+                            )
+                            for field in fieldobjects:
+                                saved_field = db_service.upsert_datafileobjectfield_row(field)
+                                if saved_field is not None:
+                                    saved_fields.append(saved_field)
+                            # If new datafile was inserted then write a headerrow record
+                            if inserted:
+                                newdatafileobjectheaderrow = DataFileObjectHeaderRow(
+                                    datafileobjectheaderrowid=-1,
+                                    datafileobjectid=saved_obj.datafileobjectid,
+                                    headernum=1,
+                                    rownumber=1,
+                                    timestamp=datetime.now(),
+                                )
+                                db_service.upsert_datafileobjectheader_row(newdatafileobjectheaderrow)
+                                
+                            # NEW: Read and persist header row mapping AFTER fields are saved
+                            header_row_mapping = _read_excel_header_row(
+                                excel_file=excel_file,
+                                sheet_name=obj.objectname,
+                                datafileobjectid=saved_obj.datafileobjectid,
+                                db_service=db_service,
+                            )
+                            if header_row_mapping:
+                                for mapping in header_row_mapping:
+                                    saved_mapping = db_service.upsert_datafileobjectfieldheader_row(mapping)
+                                    if saved_mapping is not None:
+                                        saved_headers.append(saved_mapping)
+
+
+        elif ftype == "database" and subtype == "access":
+
+            with _open_access_connection(fp) as acc_conn:
+                acc_conn.autocommit = True
+                datafileobjects = _read_access_objects(
+                    connection=acc_conn,
+                    datafileid=datafileid,
+                    
+                )
+                for obj in datafileobjects:
+                    obj.stagingtableschema = stagingtableschema
+                    obj.stagingtablename = stagingtablename
+
+                    saved_obj, inserted = db_service.upsert_datafileobject_row(obj)
+                    if saved_obj is not None:
+                        saved_objects.append(saved_obj)              
+                        if read_fileobjectfields:
+                            fieldobjects = _read_access_fields(
+                                connection=acc_conn,
+                                table_name= saved_obj.objectname,
+                                datafileobjectid=saved_obj.datafileobjectid,
+                            )
+                            for field in fieldobjects:
+                                saved_field = db_service.upsert_datafileobjectfield_row(field)
+                                if saved_field is not None:
+                                    saved_fields.append(saved_field)
+
+        elif ftype == "text":
+            datafileobjects = _read_text_objects(
+                fp=fp,
+                datafileid=datafileid,
+                
+            )
+            for obj in datafileobjects:
+                obj.stagingtableschema = stagingtableschema
+                obj.stagingtablename = stagingtablename
+                saved_obj, inserted = db_service.upsert_datafileobject_row(obj)
+                if saved_obj is not None:
+                    saved_objects.append(saved_obj)   
+                    if read_fileobjectfields:
+                        fieldobjects = _read_text_fields(
+                            fp=fp,
+                            datafileobjectid=saved_obj.datafileobjectid,
+                        )
+                        for field in fieldobjects:
+                            saved_field = db_service.upsert_datafileobjectfield_row(field)
+                            saved_fields.append(saved_field)
+        else:
+            raise ValueError(
+                f"Unsupported file type: {ftype}"
+            )
+
+    except Exception as e:
+        print(f"Error processing datafile {fp}: {e}")
+        return [], []
+
+    return saved_objects, fieldobjects

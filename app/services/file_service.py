@@ -8,9 +8,9 @@ import os
 from pathlib import Path
 import re
 import time
-from datetime import datetime
+from datetime import datetime, date
 from tkinter.font import names
-from typing import Any, Dict
+from typing import Any, Dict, Callable, Optional
 from arrow import ParserError
 import pandas as pd 
 from app.models.system_model import DataFile, DataFileObject, DataFileObjectField,DataFileObjectFieldHeader,DataFileObjectHeaderRow
@@ -18,7 +18,7 @@ from app.services.db_service import DatabaseService
 import pyodbc
 from app.constants import DEFAULT_SETTINGS, SQLSERVER_MAX_IDENTIFIER_LEN
 
-
+## File Scanning and counting helpers
 def get_file_counts(initial_folders: list[Path]) -> tuple[dict[str, int], list[str]]:
     outstring: list[str] = []
     grand_totals_by_ext: dict[str, int] = {}
@@ -109,6 +109,7 @@ def scan_subfolders(root_folders: list[str]) -> list[tuple[str, str]]:
                     out.append((d, full))
         return out
 
+## File hashing helper 
 def sha256_file(fp: Path, chunk_size: int = 1024 * 1024) -> str:
     h = hashlib.sha256()
     with fp.open("rb") as f:
@@ -119,6 +120,7 @@ def sha256_file(fp: Path, chunk_size: int = 1024 * 1024) -> str:
             h.update(chunk)
     return h.hexdigest()
 
+## Access Connection Helper for all Access file readin
 def _open_access_connection(fp: Path):
     ext = fp.suffix.lower()
 
@@ -146,131 +148,156 @@ def _open_access_connection(fp: Path):
 
     raise RuntimeError(f"Unable to open Access file '{fp}': {last_err}")
 
-def process_datafile(db_service: DatabaseService,fp: Path,datafileid: int, ftype: str,subtype: str, read_fileobjectfields: bool = True, datafileobjecttemplate: DataFileObject | None = None) -> tuple[list[DataFileObject], list[DataFileObjectField]]:
+####################################
+####################################
+## Main datafile processing function
+
+def process_datafile(db_service: DatabaseService,fp: Path,datafileid: int,ftype: str,subtype: str,read_fileobjectfields: bool = True,datafileobjecttemplate: DataFileObject | None = None,) -> tuple[list[DataFileObject], list[DataFileObjectField]]:
     """
     Read all objects and optionally all fields from a datafile.
-    Opens the file once and passes it to read methods.
+    Opens the file once and delegates to shared orchestration logic.
     """
-    saved_objects: list[DataFileObject] = []
-    saved_fields: list[DataFileObjectField] = []
-    datafileobjects = []
-    fieldobjects = []
-    saved_headers = []
-
     if datafileobjecttemplate is not None:
         stagingtableschema = datafileobjecttemplate.stagingtableschema
         stagingtablename = datafileobjecttemplate.stagingtablename
     else:
         stagingtableschema = ""
-        stagingtablename = ""   
-    
+        stagingtablename = ""
+
     try:
         if ftype == "excel":
             ext = fp.suffix.lower()
-            if ext == ".xls":
-                engine = "xlrd"
-            elif ext in (".xlsx", ".xlsm", ".xltx", ".xltm"):
-                engine = "openpyxl"
-            elif ext == ".xlsb":
-                engine = "pyxlsb"
-            else:
+            engine_map = {
+                ".xls": "xlrd",
+                ".xlsx": "openpyxl", ".xlsm": "openpyxl",
+                ".xltx": "openpyxl", ".xltm": "openpyxl",
+                ".xlsb": "pyxlsb",
+            }
+            engine = engine_map.get(ext)
+            if engine is None:
                 print(f"⚠️ Unsupported Excel extension for {fp.name}: {ext}")
                 return [], []
 
             with pd.ExcelFile(fp, engine=engine) as excel_file:
-                datafileobjects = _read_excel_objects(
-                    excel_file=excel_file,
-                    datafileid=datafileid, 
+                return _process_objects_common(
+                    db_service=db_service,
+                    datafileid=datafileid,
+                    stagingtableschema=stagingtableschema,
+                    stagingtablename=stagingtablename,
+                    read_fileobjectfields=read_fileobjectfields,
+                    read_objects_fn=lambda: _read_excel_objects(
+                        excel_file=excel_file, datafileid=datafileid
+                    ),
+                    read_fields_fn=lambda sheet_name, dfoid: _read_excel_fields(
+                        excel_file=excel_file, sheet_name=sheet_name, datafileobjectid=dfoid
+                    ),
+                    read_header_fn=lambda sheet_name, dfoid: _read_excel_header_row(
+                        excel_file=excel_file, sheet_name=sheet_name,
+                        datafileobjectid=dfoid, db_service=db_service,
+                    ),
+                    defaultrownumber=1,
                 )
-                for obj in datafileobjects:
-                    obj.stagingtableschema = stagingtableschema
-                    obj.stagingtablename = stagingtablename
-
-                    saved_obj = db_service.upsert_datafileobject_row(obj)
-                    if saved_obj is not None:
-                        saved_objects.append(saved_obj)
-
-                        if read_fileobjectfields:
-                            fieldobjects = _read_excel_fields(
-                                excel_file=excel_file,
-                                sheet_name=obj.objectname,
-                                datafileobjectid=saved_obj.datafileobjectid,
-                            )
-                            for field in fieldobjects:
-                                saved_field = db_service.upsert_datafileobjectfield_row(field)
-                                if saved_field is not None:
-                                    saved_fields.append(saved_field)
-                            # NEW: Read and persist header row mapping AFTER fields are saved
-                            header_row_mapping = _read_excel_header_row(
-                                excel_file=excel_file,
-                                sheet_name=obj.objectname,
-                                datafileobjectid=saved_obj.datafileobjectid,
-                                db_service=db_service,
-                            )
-                            if header_row_mapping:
-                                for mapping in header_row_mapping:
-                                    saved_mapping = db_service.upsert_datafileobjectfieldheader_row(mapping)
-                                    if saved_mapping is not None:
-                                        saved_headers.append(saved_mapping)
-
 
         elif ftype == "database" and subtype == "access":
-
             with _open_access_connection(fp) as acc_conn:
                 acc_conn.autocommit = True
-                datafileobjects = _read_access_objects(
-                    connection=acc_conn,
+                return _process_objects_common(
+                    db_service=db_service,
                     datafileid=datafileid,
-                    
+                    stagingtableschema=stagingtableschema,
+                    stagingtablename=stagingtablename,
+                    read_fileobjectfields=read_fileobjectfields,
+                    read_objects_fn=lambda: _read_access_objects(
+                        connection=acc_conn, datafileid=datafileid
+                    ),
+                    read_fields_fn=lambda table_name, dfoid: _read_access_fields(
+                        connection=acc_conn, table_name=table_name, datafileobjectid=dfoid
+                    ),
+                    read_header_fn=lambda table_name, dfoid: _read_access_header_row(
+                        connection=acc_conn, table_name=table_name, datafileobjectid=dfoid
+                    ),
+                    defaultrownumber=0,    
                 )
-                for obj in datafileobjects:
-                    obj.stagingtableschema = stagingtableschema
-                    obj.stagingtablename = stagingtablename
-
-                    saved_obj = db_service.upsert_datafileobject_row(obj)
-                    if saved_obj is not None:
-                        saved_objects.append(saved_obj)              
-                        if read_fileobjectfields:
-                            fieldobjects = _read_access_fields(
-                                connection=acc_conn,
-                                table_name= saved_obj.objectname,
-                                datafileobjectid=saved_obj.datafileobjectid,
-                            )
-                            for field in fieldobjects:
-                                saved_field = db_service.upsert_datafileobjectfield_row(field)
-                                if saved_field is not None:
-                                    saved_fields.append(saved_field)
 
         elif ftype == "text":
-            datafileobjects = _read_text_objects(
-                fp=fp,
+            return _process_objects_common(
+                db_service=db_service,
                 datafileid=datafileid,
-                
+                stagingtableschema=stagingtableschema,
+                stagingtablename=stagingtablename,
+                read_fileobjectfields=read_fileobjectfields,
+                read_objects_fn=lambda: _read_text_objects(fp=fp, datafileid=datafileid),
+                read_fields_fn=lambda _name, dfoid: _read_text_fields(
+                    fp=fp, datafileobjectid=dfoid
+                ),
+                read_header_fn=lambda fp, dfoid: _read_text_header_row(
+                        text_file=fp, datafileobjectid=dfoid, db_service=db_service,
+                    ),
+                defaultrownumber=1,
             )
-            for obj in datafileobjects:
-                obj.stagingtableschema = stagingtableschema
-                obj.stagingtablename = stagingtablename
-                saved_obj = db_service.upsert_datafileobject_row(obj)
-                if saved_obj is not None:
-                    saved_objects.append(saved_obj)   
-                    if read_fileobjectfields:
-                        fieldobjects = _read_text_fields(
-                            fp=fp,
-                            datafileobjectid=saved_obj.datafileobjectid,
-                        )
-                        for field in fieldobjects:
-                            saved_field = db_service.upsert_datafileobjectfield_row(field)
-                            saved_fields.append(saved_field)
+
         else:
-            raise ValueError(
-                f"Unsupported file type: {ftype}"
-            )
+            raise ValueError(f"Unsupported file type: {ftype}")
 
     except Exception as e:
         print(f"Error processing datafile {fp}: {e}")
         return [], []
 
-    return saved_objects, fieldobjects
+## Common orchestration logic for processing datafile objects, fields, and headers
+def _process_objects_common(db_service: DatabaseService,datafileid: int,stagingtableschema: str,stagingtablename: str,read_fileobjectfields: bool,read_objects_fn: Callable[[], list[DataFileObject]]
+                            ,read_fields_fn: Optional[Callable[[str, int], list[DataFileObjectField]]],read_header_fn: Optional[Callable[[str, int], list[DataFileObjectFieldHeader]]],defaultrownumber: int) -> tuple[list[DataFileObject], list[DataFileObjectField]]:
+    """
+    Shared orchestration logic for processing datafile objects/fields/headers.
+
+    read_objects_fn() -> list[DataFileObject]
+    read_fields_fn(object_name, datafileobjectid) -> list[DataFileObjectField]
+    read_header_fn(object_name, datafileobjectid) -> list[DataFileObjectFieldHeader]
+    """
+    saved_objects: list[DataFileObject] = []
+    saved_fields: list[DataFileObjectField] = []
+    saved_headers: list[DataFileObjectFieldHeader] = []
+
+    datafileobjects = read_objects_fn()
+
+    for obj in datafileobjects:
+        obj.stagingtableschema = stagingtableschema
+        obj.stagingtablename = stagingtablename
+
+        saved_obj, inserted = db_service.upsert_datafileobject_row(obj)
+        if saved_obj is None:
+            continue
+
+        saved_objects.append(saved_obj)
+
+        if not read_fileobjectfields or read_fields_fn is None:
+            continue
+
+        fieldobjects = read_fields_fn(obj.objectname, saved_obj.datafileobjectid)
+        for field in fieldobjects:
+            saved_field = db_service.upsert_datafileobjectfield_row(field)
+            if saved_field is not None:
+                saved_fields.append(saved_field)
+
+        # If new object was inserted, write a default headerrow record
+        if inserted:
+            newdatafileobjectheaderrow = DataFileObjectHeaderRow(
+                datafileobjectheaderrowid=-1,
+                datafileobjectid=saved_obj.datafileobjectid,
+                headernum=1,
+                rownumber=defaultrownumber,
+                timestamp=datetime.now(),
+            )
+            db_service.upsert_datafileobjectheader_row(newdatafileobjectheaderrow)
+
+        # Read and persist header row mapping AFTER fields are saved
+        if read_header_fn is not None:
+            header_row_mapping = read_header_fn(obj.objectname, saved_obj.datafileobjectid)
+            for mapping in header_row_mapping:
+                saved_mapping = db_service.upsert_datafileobjectfieldheader_row(mapping)
+                if saved_mapping is not None:
+                    saved_headers.append(saved_mapping)
+
+    return saved_objects, saved_fields
 
 def _read_excel_objects(excel_file: pd.ExcelFile,datafileid: int) -> list[DataFileObject]:
     """Read sheet names from an already-open Excel file."""
@@ -316,56 +343,15 @@ def _read_excel_header_row(excel_file: pd.ExcelFile,sheet_name: str,datafileobje
     - Generates sanitized names and de-duplication
     - Returns list of DataFileObjectFieldHeader objects ready to persist
     """
-    
-    # Get the header row number (default 1, or user-overridden value)
-    header_row_objects = db_service.get_datafileheaderrow_objects_by_datafileobjectid(datafileobjectid)
-
-    # iterate list of objects to find where headernum = 1   
-    for obj in header_row_objects:
-        if obj.headernum == 1:
-            header_row_objects.insert(0, header_row_objects.pop(header_row_objects.index(obj)))
-            break
-
-    header_row_number = header_row_objects[0].headernum if header_row_objects else 1
+    header_row_number = _get_or_set_header_row_number(datafileobjectid, db_service)
     
     # Read the sheet with no header assumption
     df = excel_file.parse(sheet_name=sheet_name, header=None, dtype=str)
     
     # Extract the header row (convert 1-indexed to 0-indexed)
-    header_row_values = df.iloc[header_row_number - 1].tolist()
-    
-    # Convert to ordinal-keyed dict for generate_column_names
-    header_dict: Dict[int, Dict] = {
-        i: {"OrigFieldName": val}
-        for i, val in enumerate(header_row_values)
-    }
-    
-    # Generate sanitized + de-duped names
-    header_dict = generate_column_names(header_dict)
-    
-    # Build DataFileObjectFieldHeader objects for persistence
-    mappings = []
-
-    for ordinal, field_info in header_dict.items():
-
-        field = db_service.get_datafileobjectfield_by_ordinal(datafileobjectid, ordinal)
-        fieldid = field.datafileobjectfieldid
-        orig = field_info["OrigFieldName"]
-        new = field_info["SanitizedFieldName"]
-        sanit = False if orig == new else True
-        mapping = DataFileObjectFieldHeader(
-            datafileobjectfieldheaderid=-1,
-            datafileobjectfieldid=fieldid,
-            headervalue=orig,
-            sanitisedheadervalue=new,
-            valuesanitised=sanit,
-            timestamp=datetime.now(),
-        )
-        mappings.append(mapping)
-    
-    return mappings
-
-
+    header_row_values = _get_header_row_from_dataframe(df, header_row_number)
+    return  _generate_sanitised_field_mapping(datafileobjectid, header_row_values, db_service)
+                
 def _read_access_objects(connection: pyodbc.Connection,datafileid: int) -> list[DataFileObject]:
     """Read table names from an already-open Access connection."""
     objects = []
@@ -419,6 +405,26 @@ def _read_access_fields(connection: pyodbc.Connection,table_name: str,datafileob
 
     return fields
 
+def _read_access_header_row(connection: pyodbc.Connection, table_name: str, datafileobjectid: int) -> list[DataFileObjectFieldHeader]:
+    """
+    Read the header row for a table in an Access database without fetching any data.
+    Technically there is no such thing as a header row in an Access table, but we can infer it from the column names.
+    This keeps this function consistent with how we handle header rows for other types of data sources.
+    """
+    header_row: list[DataFileObjectFieldHeader] = []
+
+    try:
+           
+        df = pd.read_sql(f"SELECT * FROM [{table_name}] WHERE 1=0", connection)
+        ## the data frame will inherit the column names from the Access table, which we can use as the header row.
+        ## so we don't need to use our _get_header_row_from_dataframe function for Access tables.
+        if df is not None:
+            header_row = _generate_sanitised_field_mapping(datafileobjectid, df.columns.tolist(), None)
+    except Exception as e:
+        print(f"Error reading Access header row: {e}")
+
+    return header_row
+
 def _read_text_objects( fp: Path, datafileid: int) -> list[DataFileObject]:
     #for this method we don't physically need to read the file, but we can add a row to DataFileObject for the CSV file itself as a "file object".
 
@@ -449,6 +455,164 @@ def _read_text_fields(fp: Path, datafileobjectid: int) -> list[DataFileObjectFie
         return []
 
     return fields
+
+def _read_text_header_row(text_file: str,datafileobjectid: int,db_service: "DatabaseService") -> list[DataFileObjectFieldHeader]:
+    """
+    Read the header row for a text file and map column ordinals to field names.
+    
+    - Queries DB to get the current header_row_number (defaults to 1 if not set)
+    - Reads that row from the text file
+    - Generates sanitized names and de-duplication
+    - Returns list of DataFileObjectFieldHeader objects ready to persist
+    """
+    header_row_number = _get_or_set_header_row_number(datafileobjectid, db_service)
+    
+    # Read the text file with no header assumption
+    df = load_text_file_to_dataframe(text_file, drop_all_null_columns=True, log_fn = None)
+    
+    # Extract the header row (convert 1-indexed to 0-indexed)
+    header_row_values = _get_header_row_from_dataframe(df, header_row_number)
+    return  _generate_sanitised_field_mapping(datafileobjectid, header_row_values, db_service)
+
+## Helper functions for handling header rows in text files
+def _get_or_set_header_row_number(datafileobjectid: int, db_service: "DatabaseService") -> int:
+    """
+    Get or set the header row number for a given datafile object.
+    If no header row is defined, a default header row with number 1 is created.
+    Returns the header row number.  
+    All files types can use this helper function.
+    """
+    # Get the header row number (default 1, or user-overridden value)
+    header_row_objects = db_service.get_datafileheaderrow_objects_by_datafileobjectid(datafileobjectid)
+
+    # If no header row objects are found, create a default one & upsert it to DB & cache
+    if not header_row_objects:
+        newheaderrowobject = DataFileObjectHeaderRow(
+            datafileobjectheaderrowid=-1,
+            datafileobjectid=datafileobjectid,
+            headernum=1,
+            rownumber=1,
+            timestamp=datetime.now(),
+        )
+        db_service.upsert_datafileobjectheaderrow_row(newheaderrowobject)
+        header_row_objects.insert(0, newheaderrowobject)
+    else:
+        # iterate list of objects to find where headernum = 1   
+        for obj in header_row_objects:
+            if obj.headernum == 1:
+                header_row_objects.insert(0, header_row_objects.pop(header_row_objects.index(obj)))
+                break
+
+    header_row_number = header_row_objects[0].headernum if header_row_objects else 1
+    return header_row_number
+
+def _get_header_row_from_dataframe(df: pd.DataFrame, header_row_number: int) -> list:
+    """
+    Extract the header row from a DataFrame given the header row number.
+    
+    - Converts 1-indexed header_row_number to 0-indexed for DataFrame access
+    - Returns the header row as a list of values
+    """
+    return df.iloc[header_row_number - 1].tolist()
+
+def _generate_sanitised_field_mapping(datafileobjectid: int,header_row_values: list, db_service: "DatabaseService") -> list[DataFileObjectFieldHeader]:
+    """
+    Sanitise and de-duplicate column names in the header dictionary.
+    
+    - header_row_values: List of original header row values
+    - Returns a dict with updated "SanitisedFieldName" ensuring uniqueness for each column ordinal
+    """
+    # Convert to ordinal-keyed dict for generate_column_names
+    header_dict: Dict[int, Dict] = {
+        i: {"OrigFieldName": val}
+        for i, val in enumerate(header_row_values)
+    }
+    
+    # Generate sanitized + de-duped names
+    header_dict = generate_column_names(header_dict)
+    
+    # Build DataFileObjectFieldHeader objects for persistence
+    mappings = []
+
+    for ordinal, field_info in header_dict.items():
+
+        field = db_service.get_datafileobjectfield_by_ordinal(datafileobjectid, ordinal)
+        fieldid = field.datafileobjectfieldid
+        orig = field_info["OrigFieldName"]
+        new = field_info["SanitizedFieldName"]
+        sanit = False if orig == new else True
+        mapping = DataFileObjectFieldHeader(
+            datafileobjectfieldheaderid=-1,
+            datafileobjectfieldid=fieldid,
+            headernum=1,
+            headervalue=orig,
+            sanitisedheadervalue=new,
+            valuesanitised=sanit,
+            timestamp=datetime.now(),
+        )
+        mappings.append(mapping)
+    
+    return mappings
+
+def generate_column_names(header_values: Dict[int, Dict]) -> Dict[int, Dict]:
+    """
+    Shared logic: turn a raw header row into clean column names.
+    - Pass 1: Sanitize all values (fill nulls, remove special chars)
+    - Pass 2: De-duplicate by appending _occurrence_number, ensuring no collisions
+
+    header_values is keyed by ordinal column position, each value a dict containing
+    at least "OrigFieldName". This function adds "SanitizedFieldName" to each dict.
+    """
+    # Pass 1: Sanitize all values
+    unknown_counter = 0
+
+    for i, fieldnames in header_values.items():
+        val = fieldnames.get("OrigFieldName")
+        if not val or (isinstance(val, str) and val.strip() == ""):
+            unknown_counter += 1
+
+        sanitized = sanitize_column_name(val, unknown_counter)
+        header_values[i]["SanitizedFieldName"] = sanitized  # preserve OrigFieldName
+
+    # Pass 2: De-duplicate with occurrence numbering
+    occurrence_count: dict[str, int] = {}
+    all_sanitized_lower: set[str] = {
+        v["SanitizedFieldName"].lower() for v in header_values.values()
+    }  # snapshot from pass 1 — computed once, not rebuilt every iteration
+    assigned_names_lower: set[str] = set()
+
+    for i, fieldnames in header_values.items():
+        sanitized = fieldnames["SanitizedFieldName"]
+        sanitized_lower = sanitized.lower()
+
+        occurrence_count[sanitized_lower] = occurrence_count.get(sanitized_lower, 0) + 1
+        occurrence_num = occurrence_count[sanitized_lower]
+
+        if occurrence_num > 1:
+            candidate = f"{sanitized}_{occurrence_num}"
+            while candidate.lower() in all_sanitized_lower or candidate.lower() in assigned_names_lower:
+                occurrence_num += 1
+                candidate = f"{sanitized}_{occurrence_num}"
+            final_name = candidate
+        else:
+            final_name = sanitized
+
+        header_values[i]["SanitizedFieldName"] = final_name
+        assigned_names_lower.add(final_name.lower())
+
+    return header_values
+
+def sanitize_column_name(col: str, fallback_idx: int) -> str:
+    c = str(col).strip()
+    if not c:
+        c = f"UnkCol_{fallback_idx}"
+    c = c.replace(" ", "_")
+    c = re.sub(r"[^A-Za-z0-9_]", "_", c)
+    c = re.sub(r"_+", "_", c).strip("_")
+    if not c:
+        c = f"UnkCol_{fallback_idx}"
+    return c
+## End of helper functions for handling header rows in text files
 
 def get_fields_from_dataframe(df: pd.DataFrame, datafileobjectid: int) -> list[DataFileObjectField]:
     
@@ -586,6 +750,10 @@ def normalize_date_separators(s: pd.Series) -> pd.Series:
     out = out.str.replace(r"-{2,}", "-", regex=True)
     return out
 
+####################################
+## Text file loading helpers
+####################################
+
 def load_text_file_to_dataframe(file_path: Path, drop_all_null_columns: bool = True, log_fn=None) -> pd.DataFrame:
     """
     Basic parser:
@@ -669,17 +837,6 @@ def read_text_lines_fallback(path):
             last_err = e
     raise last_err
 
-def sanitize_column_name(col: str, fallback_idx: int) -> str:
-    c = str(col).strip()
-    if not c:
-        c = f"UnkCol_{fallback_idx}"
-    c = c.replace(" ", "_")
-    c = re.sub(r"[^A-Za-z0-9_]", "_", c)
-    c = re.sub(r"_+", "_", c).strip("_")
-    if not c:
-        c = f"UnkCol_{fallback_idx}"
-    return c
-
 def get_operable_filetypes() -> Dict[str, dict]:
     settings = DEFAULT_SETTINGS
 
@@ -701,53 +858,6 @@ def get_operable_filetypes() -> Dict[str, dict]:
 
 
 ############# Methods below this line added for extraction
-def generate_column_names(header_values: Dict[int, Dict]) -> Dict[int, Dict]:
-    """
-    Shared logic: turn a raw header row into clean column names.
-    - Pass 1: Sanitize all values (fill nulls, remove special chars)
-    - Pass 2: De-duplicate by appending _occurrence_number, ensuring no collisions
-
-    header_values is keyed by ordinal column position, each value a dict containing
-    at least "OrigFieldName". This function adds "SanitizedFieldName" to each dict.
-    """
-    # Pass 1: Sanitize all values
-    unknown_counter = 0
-
-    for i, fieldnames in header_values.items():
-        val = fieldnames.get("OrigFieldName")
-        if not val or (isinstance(val, str) and val.strip() == ""):
-            unknown_counter += 1
-
-        sanitized = sanitize_column_name(val, unknown_counter)
-        header_values[i]["SanitizedFieldName"] = sanitized  # preserve OrigFieldName
-
-    # Pass 2: De-duplicate with occurrence numbering
-    occurrence_count: dict[str, int] = {}
-    all_sanitized_lower: set[str] = {
-        v["SanitizedFieldName"].lower() for v in header_values.values()
-    }  # snapshot from pass 1 — computed once, not rebuilt every iteration
-    assigned_names_lower: set[str] = set()
-
-    for i, fieldnames in header_values.items():
-        sanitized = fieldnames["SanitizedFieldName"]
-        sanitized_lower = sanitized.lower()
-
-        occurrence_count[sanitized_lower] = occurrence_count.get(sanitized_lower, 0) + 1
-        occurrence_num = occurrence_count[sanitized_lower]
-
-        if occurrence_num > 1:
-            candidate = f"{sanitized}_{occurrence_num}"
-            while candidate.lower() in all_sanitized_lower or candidate.lower() in assigned_names_lower:
-                occurrence_num += 1
-                candidate = f"{sanitized}_{occurrence_num}"
-            final_name = candidate
-        else:
-            final_name = sanitized
-
-        header_values[i]["SanitizedFieldName"] = final_name
-        assigned_names_lower.add(final_name.lower())
-
-    return header_values
 
 def prepare_dataframe_for_insert(df: pd.DataFrame, col_types: Dict[str, str], date_format_label: str = "Auto") -> pd.DataFrame:
     out = df.copy()
@@ -798,7 +908,6 @@ def json_default(self,o):
     if isinstance(o, (datetime, date)):
         return o.isoformat()
     return str(o)  # safe fallback
-
 
 def safe_text(self, v):
     if v is None:

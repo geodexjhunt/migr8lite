@@ -237,7 +237,7 @@ class DataFileObjectFieldHeader:
 class DataFileObjectHeaderRow:
     datafileobjectheaderrowid: int
     datafileobjectid: int
-    headernumber: int
+    headernum: int
     rownumber: int
     timestamp: datetime
     @classmethod
@@ -246,9 +246,16 @@ class DataFileObjectHeaderRow:
         return cls(
             datafileobjectheaderrowid=row["datafileobjectheaderrowid"],
             datafileobjectid=row["datafileobjectid"],
-            headernumber=row["headernumber"],
+            headernum=row["headernum"],
             rownumber=row["rownumber"],
             timestamp=row["timestamp"],
+        )
+    def has_same_content(self, other: "DataFileObjectHeaderRow") -> bool:
+        """Check if another DataFileObjectHeaderRow has the same content (excluding the ID)."""
+        return (
+            self.datafileobjectid == other.datafileobjectid and
+            self.headernum == other.headernum and
+            self.rownumber == other.rownumber
         )
 
 
