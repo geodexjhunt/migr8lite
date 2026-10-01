@@ -52,7 +52,7 @@ class ExtractService(QObject):
 
 
 
-    def apply_header_row(self, df: pd.DataFrame, header_row: int) -> pd.DataFrame:
+    def apply_header_row(self, df: pd.DataFrame, header_row: int) -> tuple[pd.DataFrame, pd.DataFrame]:
         """
         Given a raw dataframe (no header assumed) and a 1-indexed header_row,
         extract column names from that row and tag pre-header rows.
@@ -77,26 +77,37 @@ class ExtractService(QObject):
         pre_header_df = df.iloc[:header_idx].copy()
         pre_header_df.columns = col_list  # same column count, so labels still line up positionally
 
+        # Build the original header row as its own DataFrame row, using col_list as column names
+        orig_header_row = {
+            col_list[idx]: header_values[idx]["OrigFieldName"]
+            for idx in range(len(col_list))
+        }
+        orig_header_df = pd.DataFrame([orig_header_row], columns=col_list)
+
+        # Append the original header row to the end of pre_header_df (its original position)
+        pre_header_df = pd.concat([pre_header_df, orig_header_df], ignore_index=True)
+
+
         # Add row numbering + flag
         max_row = len(df)
         data_df["_source_row_number"] = range(header_idx + 1, header_idx + 1 + len(data_df))
         data_df["_is_pre_header"] = False
 
-        pre_header_df["_source_row_number"] = range(max_row + 1, max_row + 1 + len(pre_header_df))
+        pre_header_df["_source_row_number"] = range(1, len(pre_header_df) + 1)
         pre_header_df["_is_pre_header"] = True
 
-        combined = pd.concat([data_df, pre_header_df], ignore_index=True)
-        combined = combined.fillna("")  # or another placeholder
-        return combined
+        #combined = pd.concat([data_df, pre_header_df], ignore_index=True)
+        #combined = combined.fillna("")  # or another placeholder
+        return pre_header_df.fillna(""), data_df.fillna("")
     
-    def preview_with_header(self, file_path: Path, sheet_name: str | None, header_row: int) -> pd.DataFrame:
+    def preview_with_header(self, file_path: Path, sheet_name: str | None, header_row: int) -> tuple[pd.DataFrame, pd.DataFrame]:
         cache_key = (file_path, sheet_name)
         operable = get_operable_filetypes()
         ext = file_path.suffix.lower().lstrip(".")
         meta = operable.get(ext)
         if not meta:
             self.append_log(f"⏭️ Unsupported extension for file object read: .{ext} ({file_path.name})")
-            return  # or continue
+            return pd.DataFrame(), pd.DataFrame()  # or continue
 
         ftype = (meta.get("type") or "").lower()
         subtype = (meta.get("subtype") or "").lower()

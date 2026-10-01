@@ -15,6 +15,7 @@ from app.models.migration_context import MigrationContext
 from config.config import Config
 from app.services.db_service import DatabaseService
 from app.ui.tabs.dynamic_grid import DynamicGrid
+from app.ui.tabs.synced_dual_grid import SyncedDualGrid
 
 class ExtractTab(QWidget):
 
@@ -78,8 +79,11 @@ class ExtractTab(QWidget):
         central_right_layout = QVBoxLayout()
         self.extract_details_label = QLabel("Preview files and assess header locations.")
         central_right_layout.addWidget(self.extract_details_label)
-        self.preview_grid = DynamicGrid(context=self.context)
-        central_right_layout.addWidget(self.preview_grid)
+        #self.preview_grid = DynamicGrid(context=self.context)
+        #central_right_layout.addWidget(self.preview_grid)
+        self.dual_grid = SyncedDualGrid(context=self.context, parent=self)
+        central_right_layout.addWidget(self.dual_grid)
+
 
         central_splitter.addWidget(QWidget())
         central_splitter.widget(1).setLayout(central_right_layout)
@@ -354,6 +358,16 @@ class ExtractTab(QWidget):
                 #print("Table selected with user_data:", user_data)
                 self.extract_details_label.setText(f"Selected: {user_data.get('objectname', 'Unknown')}")
                 self._load_preview(user_data)
+            ## if its a file item, but the file item only contains 1 table, then get the table
+            elif isinstance(user_data, dict) and user_data.get("level") == "file":
+                child_count = item.childCount()
+                if child_count == 1:
+                    child_item = item.child(0)
+                    child_data = child_item.data(0, Qt.ItemDataRole.UserRole)
+                    if isinstance(child_data, dict) and child_data.get("level") == "table":
+                        self.extract_details_label.setText(f"Selected: {child_data.get('objectname', 'Unknown')}")
+                        self._load_preview(child_data)
+            
 
     def _on_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         #print("On Item clicked fired")
@@ -375,7 +389,8 @@ class ExtractTab(QWidget):
             self.current_table_name = staging_tablename
             self.current_table_schema = staging_schema
 
-            self.preview_grid.clear_contents()
+            #self.preview_grid.clear_contents()
+            self.dual_grid.clear_contents()
 
             header_row_from_cache: DataFileObjectHeaderRow = self.db_service.get_datafileheaderrow_object_by_datafileobjectid_and_headernum(datafileobjectid, 1)
             header_row = header_row_from_cache.rownumber if header_row_from_cache else 1
@@ -386,20 +401,48 @@ class ExtractTab(QWidget):
             # combine folderpath and filename as a path 
             file_path = Path(folderpath) / filename
 
-            preview_df = self.extract_service.preview_with_header(
+            pre_header_df, data_df = self.extract_service.preview_with_header(
                 file_path=file_path,
                 sheet_name=objectname,
                 header_row=header_row
             )
 
-            cols: List[Dict]
-            rows: List[Dict]
+            # Split into pre-header and data based on _is_pre_header flag
+            #pre_header_df = preview_df[preview_df['_is_pre_header'] == True]
+            #data_df = preview_df[preview_df['_is_pre_header'] == False]
+
+
+            cols_for_both: List[Dict]
+            #rows: List[Dict]
+            top_rows: List[Dict]
+            bottom_rows: List[Dict]
+
 
             # Cols needs to have the Column names as COLUMN_NAME in the dict
-            cols = [{'COLUMN_NAME': col} for col in preview_df.columns]
+            cols_for_both = [{'COLUMN_NAME': col} for col in data_df.columns]
             # rows is a list of data row dicts
-            rows = [dict(zip(preview_df.columns, row)) for row in preview_df.values.tolist()]
+            #rows = [dict(zip(data_df.columns, row)) for row in data_df.values.tolist()]
+
+            # Build rows, excluding metadata columns
+            top_rows = [
+                {col: row.get(col, "") for col in data_df.columns}
+                for _, row in pre_header_df.iterrows()
+            ]
+            bottom_rows = [
+                {col: row.get(col, "") for col in data_df.columns}
+                for _, row in data_df.iterrows()
+            ]
+
 
             editable = False
             #print(f"Preview DataFrame loaded with columns: {cols} and number of rows: {len(rows)}")
-            self.preview_grid.load_data(rows=rows, columns=cols, editable=editable)
+            #self.preview_grid.load_data(rows=rows, columns=cols, editable=editable)
+            # Load into dual grid
+            #self.dual_grid = SyncedDualGrid(self.context, parent=self)
+            self.dual_grid.load_data(
+                top_columns=cols_for_both,
+                top_rows=top_rows,
+                bottom_columns=cols_for_both,
+                bottom_rows=bottom_rows,
+                bottom_editable=editable  # For preview; set True for actual import
+            )
