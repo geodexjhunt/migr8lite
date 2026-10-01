@@ -67,7 +67,7 @@ class DatabaseService(QObject):
 
         # Datafile object field header caching
         self._datafileobjectfieldheaders_by_id: dict[int, DataFileObjectFieldHeader] = {}
-        self._datafileobjectheader_by_fieldid_and_headernum: dict[tuple[int, int], DataFileObjectFieldHeader] = {}
+        self._datafileobjectfieldheader_by_fieldid_and_headernum: dict[tuple[int, int], DataFileObjectFieldHeader] = {}
 
         # Datafile object header row caching
         self._datafileobjectheaderrows_by_id: dict[int, DataFileObjectHeaderRow] = {}
@@ -83,7 +83,7 @@ class DatabaseService(QObject):
         self.jobrunversiontable = config.system_management_config.get("jobrunversion_table")
         self.jobfolderstable = config.system_management_config.get("jobfolders_table")
         self.datafileobjectfieldtable = config.system_management_config.get("datafileobjectfield_table")
-        self.datafileobjectfieldheadertable = config.system_management_config.get("datafileobjectheader_table")
+        self.datafileobjectfieldheadertable = config.system_management_config.get("datafileobjectfieldheader_table")
         self.datafileobjectheaderrowtable = config.system_management_config.get("datafileobjectheaderrow_table")
 
     def build_connection_string(self) -> str:
@@ -724,7 +724,7 @@ class DatabaseService(QObject):
 
         try:
             if existing_df is None:
-                print(f"Inserting datafileobject: {datafileobject.datafileid} :: {datafileobject.datafileobjectid} :: {datafileobject.objectname}")
+                #print(f"Inserting datafileobject: {datafileobject.datafileid} :: {datafileobject.datafileobjectid} :: {datafileobject.objectname}")
                 return self._insert_datafileobject(datafileobject), True
             else:
                 ## Equalise the staging details as these are predicated on the current job details
@@ -736,10 +736,10 @@ class DatabaseService(QObject):
                 datafileobject.stagingtablename = stagingname
 
                 if existing_df.has_same_content(datafileobject):
-                    print(f"No changes detected for datafileobject: {datafileobject.datafileid} :: {existing_df.datafileobjectid} :: {datafileobject.objectname}")
+                    #print(f"No changes detected for datafileobject: {datafileobject.datafileid} :: {existing_df.datafileobjectid} :: {datafileobject.objectname}")
                     return existing_df, None
                 else:
-                    print(f"Updating datafileobject: {datafileobject.datafileid} :: {existing_df.datafileobjectid} :: {datafileobject.objectname}")
+                    #print(f"Updating datafileobject: {datafileobject.datafileid} :: {existing_df.datafileobjectid} :: {datafileobject.objectname}")
                     # Ensure the print statement is executed before returning the updated object   
                     datafileobject.datafileobjectid = existing_df.datafileobjectid 
                     return self._update_datafileobject(datafileobject), False
@@ -805,26 +805,29 @@ class DatabaseService(QObject):
             return obj
         return None
 
-    def upsert_datafileobjectfieldheader_row(self, obj: "DataFileObjectFieldHeader") -> "DataFileObjectFieldHeader" | None:
+    def upsert_datafileobjectfieldheader_row(self, obj: "DataFileObjectFieldHeader") -> DataFileObjectFieldHeader | None:
         """Insert or update a DataFileObjectFieldHeader record."""
         existing_dfof = self.get_datafileobjectfieldheader_by_fieldid_and_headernum(obj.datafileobjectfieldid, obj.headernum)
         try:
             if existing_dfof is None:
+                print(f'Inserting new datafileobjectfieldheader: {obj.datafileobjectfieldid} :: {obj.headernum}')
                 return self._insert_datafileobjectfieldheader(obj)
             else:
                 obj.datafileobjectfieldheaderid = existing_dfof.datafileobjectfieldheaderid
                 if existing_dfof.has_same_content(obj):
+                    print(f'No changes detected for datafileobjectfieldheader: {obj.datafileobjectfieldid} :: {obj.headernum}')
                     return existing_dfof
                 else:
+                    print(f'Updating datafileobjectfieldheader: {obj.datafileobjectfieldid} :: {obj.headernum}')
                     return self._update_datafileobjectfieldheader(obj)
-        except:
-            #print(f"Error occurred while upserting datafileobjectfieldheader: {obj.datafileobjectfieldid} -- error ")
+        except Exception as e:
+            print(f"Error occurred while upserting datafileobjectfieldheader: {obj.datafileobjectfieldid} -- error ")
             return None
 
-    def _insert_datafileobjectfieldheader(self, obj: "DataFileObjectFieldHeader") -> "DataFileObjectFieldHeader" | None:
+    def _insert_datafileobjectfieldheader(self, obj: "DataFileObjectFieldHeader") -> DataFileObjectFieldHeader | None:
                 
         sql = f"""
-        INSERT INTO {self.datafileobjectfieldheaderrowtable} (datafileobjectfieldid, headernum, headervalue, sanitisedheadervalue, valuesanitised, timestamp)
+        INSERT INTO {self.datafileobjectfieldheadertable} (datafileobjectfieldid, headernum, headervalue, sanitisedheadervalue, valuesanitised, timestamp)
         OUTPUT inserted.datafileobjectfieldheaderid
         VALUES (?, ?, ?, ?, ?, ?)
        """
@@ -836,14 +839,18 @@ class DatabaseService(QObject):
             obj.valuesanitised,
             obj.timestamp,
         )
-        row = self.execute_returning_one(sql, params)
-        if row is not None and row > 0:
-            obj.datafileobjectfieldheaderid = row["datafileobjectfieldheaderid"]
-            self.add_datafileobjectfieldheaders_to_cache(obj)
-            return obj
-        return None
+        try:
+            row = self.execute_returning_one(sql, params)
+            if row is not None and row > 0:
+                obj.datafileobjectfieldheaderid = row["datafileobjectfieldheaderid"]
+                self.add_datafileobjectfieldheaders_to_cache(obj)
+                return obj
+            return None
+        except Exception as e:
+            print(f"Error occurred while inserting datafileobjectfieldheader: {obj.datafileobjectfieldid} -- error {e}")
+            return None
 
-    def _update_datafileobjectfieldheader(self, obj: "DataFileObjectFieldHeader") -> "DataFileObjectFieldHeader" | None:
+    def _update_datafileobjectfieldheader(self, obj: "DataFileObjectFieldHeader") -> DataFileObjectFieldHeader | None:
         sql = f"""
         UPDATE {self.datafileobjectfieldheaderrowtable}
         SET datafileobjectfieldid = ?, headernum = ?, headervalue = ?, sanitisedheadervalue = ?, valuesanitised = ?, timestamp = ?
@@ -864,7 +871,7 @@ class DatabaseService(QObject):
             return obj
         return None
 
-    def upsert_datafileobjectheaderrow_row(self, obj: "DataFileObjectHeaderRow") -> "DataFileObjectHeaderRow" | None:
+    def upsert_datafileobjectheaderrow_row(self, obj: "DataFileObjectHeaderRow") -> DataFileObjectHeaderRow | None:
         
         existing_obj = self.get_datafileheaderrow_object_by_datafileobjectid_and_headernum(obj.datafileobjectid, obj.headernum)
         try:
@@ -880,7 +887,7 @@ class DatabaseService(QObject):
             #print(f"Error occurred while upserting datafileobjectfieldheader: {obj.datafileobjectfieldid} -- error ")
             return None
 
-    def _insert_datafileobjectheaderrow(self, obj: "DataFileObjectHeaderRow") -> "DataFileObjectHeaderRow" | None:
+    def _insert_datafileobjectheaderrow(self, obj: "DataFileObjectHeaderRow") -> DataFileObjectHeaderRow | None:
         sql = f"""
         INSERT INTO {self.datafileobjectheaderrowtable} (datafileobjectid, headernum, rownumber, timestamp)
         OUTPUT INSERTED.datafileobjectheaderrowid
@@ -899,7 +906,7 @@ class DatabaseService(QObject):
             return obj
         return None
 
-    def _update_datafileobjectheaderrow(self, obj: "DataFileObjectHeaderRow") -> "DataFileObjectHeaderRow" | None:
+    def _update_datafileobjectheaderrow(self, obj: "DataFileObjectHeaderRow") -> DataFileObjectHeaderRow | None:
         sql = f"""
         UPDATE {self.datafileobjectheaderrowtable}
         SET headernum = ?, rownumber = ?, timestamp = ?
@@ -1004,6 +1011,12 @@ class DatabaseService(QObject):
     def get_datafile_by_id(self, datafile_id: int) -> DataFile | None:
         """Retrieve a datafile record by its ID."""
         return self._datafiles_by_id.get(datafile_id)
+
+    ################################
+    ###
+    ### REFRESH CACHE METHODS
+    ###
+    ################################
 
     def refresh_jobfile_cache(self, jobrunversionid: int) -> None:
         """Re-query jobfiles and refresh the internal cache."""
@@ -1135,7 +1148,7 @@ class DatabaseService(QObject):
             for row in rows
         }
 
-        self._datafileobjectheader_by_fieldid_and_headernum = {
+        self._datafileobjectfieldheader_by_fieldid_and_headernum = {
             (row["datafileobjectfieldid"], row["headernum"]): DataFileObjectFieldHeader.from_db_row(row)
             for row in rows
         }
@@ -1242,7 +1255,7 @@ class DatabaseService(QObject):
         """Add or update datafileobjectfieldheaders in the cache."""
         for fieldheader in fieldheaders:
             self._datafileobjectfieldheader_by_id[fieldheader.datafileobjectfieldheaderid] = fieldheader
-            self._datafileobjectheader_by_fieldid_and_headernum[(fieldheader.datafileobjectfieldid, fieldheader.headernum)] = fieldheader
+            self._datafileobjectfieldheader_by_fieldid_and_headernum[(fieldheader.datafileobjectfieldid, fieldheader.headernum)] = fieldheader
         self.datafileobjectfieldheader_cache_changed.emit()
 
     def add_datafileobjectheaderrows_to_cache(self, headerrows: list[DataFileObjectHeaderRow]) -> None:
@@ -1292,7 +1305,7 @@ class DatabaseService(QObject):
 
     def get_datafileobjectfieldheader_by_fieldid_and_headernum(self, datafileobjectfieldid: int, headernum: int) -> DataFileObjectFieldHeader:
         """Return a DataFileObjectFieldHeader object by its datafileobjectfieldid and headernum."""
-        return self._datafileobjectheader_by_fieldid_and_headernum.get((datafileobjectfieldid, headernum))
+        return self._datafileobjectfieldheader_by_fieldid_and_headernum.get((datafileobjectfieldid, headernum))
 
  
     def normalize_path_key(self, pathlike) -> str:

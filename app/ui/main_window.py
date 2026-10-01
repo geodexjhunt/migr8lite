@@ -36,6 +36,8 @@ class MainWindow(QMainWindow):
         self.db_service.refresh_datafile_cache()
         self.db_service.refresh_datafileobject_cache()
         self.db_service.refresh_datafileobjectfield_cache() 
+        self.db_service.refresh_datafileobjectfieldheader_cache()
+        self.db_service.refresh_datafileobjectheaderrow_cache()
 
         if self.context.current_jobrunversionid is not None:
             self.db_service.refresh_jobfolder_cache(self.context.current_jobrunversionid)

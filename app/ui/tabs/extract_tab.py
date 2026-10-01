@@ -1,7 +1,11 @@
 from multiprocessing import context
+
+from pathlib import Path
+from app.models.system_model import DataFileObjectHeaderRow, JobFolder
+from app.services.extract_service import ExtractService
 from config.config import Config
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTreeWidget, QTreeWidgetItem,
+    QCheckBox, QSplitter, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTreeWidget, QTreeWidgetItem,
     QPushButton, QMessageBox,
 )
 from PyQt6.QtGui import QBrush, QColor
@@ -10,6 +14,7 @@ from typing import List, Dict
 from app.models.migration_context import MigrationContext
 from config.config import Config
 from app.services.db_service import DatabaseService
+from app.ui.tabs.dynamic_grid import DynamicGrid
 
 class ExtractTab(QWidget):
 
@@ -27,7 +32,15 @@ class ExtractTab(QWidget):
         self.config = config
         self.db_service = db_service
 
+        self.extract_service = ExtractService(
+            context=self.context,
+            db_service=self.db_service,  
+        )
+
         self._updating_checks = False  # guard against recursive itemChanged signals
+
+        self.current_table_schema = ""
+        self.current_table_name = ""
 
         self._build_ui()
 
@@ -40,16 +53,52 @@ class ExtractTab(QWidget):
 
         header_layout = QHBoxLayout()
         header_layout.addWidget(QLabel("Objects in Current Task"))
+
+        self.hide_dup_checkbox = QCheckBox("Hide Duplicates DataFiles?")
+        self.hide_dup_checkbox.setChecked(True)  # default to hiding duplicates
+        self.hide_dup_checkbox.stateChanged.connect(lambda _: self._refresh_extract_tree(self.context.current_task_id))
+        header_layout.addWidget(self.hide_dup_checkbox)
+
         layout.addLayout(header_layout)
 
+        central_layout = QVBoxLayout()
+
+        central_splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        central_left_layout = QVBoxLayout()
         self.extract_tree = QTreeWidget()
         self.extract_tree.setHeaderLabel("File & Object >> Table")
         self.extract_tree.itemChanged.connect(self._on_item_changed)
-        layout.addWidget(self.extract_tree)
+        self.extract_tree.itemSelectionChanged.connect(self._on_selection_changed)
+        central_left_layout.addWidget(self.extract_tree)
+       
+        central_splitter.addWidget(QWidget())
+        central_splitter.widget(0).setLayout(central_left_layout)
+    
+        central_right_layout = QVBoxLayout()
+        self.extract_details_label = QLabel("Preview files and assess header locations.")
+        central_right_layout.addWidget(self.extract_details_label)
+        self.preview_grid = DynamicGrid(context=self.context)
+        central_right_layout.addWidget(self.preview_grid)
+
+        central_splitter.addWidget(QWidget())
+        central_splitter.widget(1).setLayout(central_right_layout)
+ 
+        central_layout.addWidget(central_splitter)
+
+        layout.addLayout(central_layout)
+        
+        extract_footer_layout = QVBoxLayout()
 
         self.extract_selected_button = QPushButton("Extract Selected Files")
         self.extract_selected_button.clicked.connect(self._on_extract_selected_clicked)
-        layout.addWidget(self.extract_selected_button)
+        extract_footer_layout.addWidget(self.extract_selected_button)
+
+        self.extract_all_button = QPushButton("Extract All Files")
+        self.extract_all_button.clicked.connect(self._on_extract_all_clicked)
+        extract_footer_layout.addWidget(self.extract_all_button)   
+        layout.addLayout(extract_footer_layout)
+
 
     # ------------------------------------------------------------------
     # Context signal handlers
@@ -132,7 +181,7 @@ class ExtractTab(QWidget):
                     file_item.setForeground(0, QBrush(QColor("black")))
                     alldups = False
     
-                file_item.setData(0, Qt.ItemDataRole.UserRole, {"level": "file", "folderid": folderid, "filename": filename})
+                file_item.setData(0, Qt.ItemDataRole.UserRole, {"level": "file", "folderid": folderid, "filename": filename, "occurrence_number": datafile_occurrence_number})
                 file_item.setFlags(
                     file_item.flags()
                     | Qt.ItemFlag.ItemIsUserCheckable
@@ -160,23 +209,27 @@ class ExtractTab(QWidget):
                     table_item = QTreeWidgetItem(
                         [f"{table['objectname']} {'✔' if imported else '✖'} {staging_name or '(no staging table)'}"]
                     )
-                    table_item.setData(0, Qt.ItemDataRole.UserRole, {"level": "table", "row": table})
+                    table_item.setData(0, Qt.ItemDataRole.UserRole, {"level": "table", "row": table, "occurrence_number": datafile_occurrence_number})
                     
                     table_item.setFlags(table_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                     table_item.setCheckState(0, Qt.CheckState.Unchecked)
 
                     if datafile_occurrence_number > 1:
                         table_item.setFlags(table_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
-
+                        if self.hide_dup_checkbox.isChecked():
+                            table_item.setHidden(True)
                     file_item.addChild(table_item)
 
                 if datafile_occurrence_number > 1:
                     file_item.setFlags(file_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
-
+                    if self.hide_dup_checkbox.isChecked():
+                        file_item.setHidden(True)
                 folder_item.addChild(file_item)
                 if alldups == True:
                     folder_item.setFlags(folder_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
                     folder_item.setForeground(0, QBrush(QColor("red")))
+                    if self.hide_dup_checkbox.isChecked():
+                        folder_item.setHidden(True)
             self._updating_checks = False
 
         except Exception as error:
@@ -249,6 +302,31 @@ class ExtractTab(QWidget):
 
         return selected
 
+    def get_all_unique_tables(self) -> list[dict]:
+        """Return the raw `row` dicts for every table item where occurrence_number = 1."""
+        all_tables: list[dict] = []
+
+        def walk(item: QTreeWidgetItem) -> None:
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(data, dict) and data.get("level") == "table":
+                if data.get("occurrence_number") == 1:
+                    all_tables.append(data["row"])
+            for i in range(item.childCount()):
+                walk(item.child(i))
+
+        for i in range(self.extract_tree.topLevelItemCount()):
+            walk(self.extract_tree.topLevelItem(i))
+
+        return all_tables
+
+    def _on_extract_all_clicked(self) -> None:
+        selected_tables = self.get_all_unique_tables()
+
+        # TODO: replace with real extraction logic
+        print(f"DEBUG: Extracting all {len(selected_tables)} table(s):")
+        for row in selected_tables:
+            print(f"  - {row.get('objectname')} ({row.get('stagingtablename')})")
+
     def _on_extract_selected_clicked(self) -> None:
         selected_tables = self.get_selected_tables()
 
@@ -260,3 +338,68 @@ class ExtractTab(QWidget):
         print(f"DEBUG: Extracting {len(selected_tables)} selected table(s):")
         for row in selected_tables:
             print(f"  - {row.get('objectname')} ({row.get('stagingtablename')})")
+
+    # ------------------------------------------------------------------
+    #  Table Preview Generation
+    # ------------------------------------------------------------------
+
+    def _on_selection_changed(self) -> None:
+        #print("On Selection changed fired")
+        selected_items = self.extract_tree.selectedItems()
+        if selected_items:
+            item = selected_items[0]
+            user_data = item.data(0, Qt.ItemDataRole.UserRole)
+            #print("User data retrieved:", user_data)
+            if isinstance(user_data, dict) and user_data.get("level") == "table":
+                #print("Table selected with user_data:", user_data)
+                self.extract_details_label.setText(f"Selected: {user_data.get('objectname', 'Unknown')}")
+                self._load_preview(user_data)
+
+    def _on_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        #print("On Item clicked fired")
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(data, dict) and data.get("level") == "table":
+            self.extract_details_label.setText(f"Selected: {data.get('objectname', 'Unknown')}")
+            self._load_preview(data)
+            
+    def _load_preview(self, data: dict):
+        #print("Loading preview for data:", data)
+        full_row = data["row"]
+            
+        datafileobjectid = full_row["datafileobjectid"]
+        objectname = full_row["objectname"]
+        staging_tablename = full_row["stagingtablename"]
+        staging_schema = full_row["stagingtableschema"]
+        #print(f"Full row data: {full_row}")
+        if self.current_table_name != staging_tablename or self.current_table_schema != staging_schema:
+            self.current_table_name = staging_tablename
+            self.current_table_schema = staging_schema
+
+            self.preview_grid.clear_contents()
+
+            header_row_from_cache: DataFileObjectHeaderRow = self.db_service.get_datafileheaderrow_object_by_datafileobjectid_and_headernum(datafileobjectid, 1)
+            header_row = header_row_from_cache.rownumber if header_row_from_cache else 1
+            folder_from_cache: JobFolder = self.db_service.get_jobfolder(full_row["folderid"])
+            folderpath = folder_from_cache.folderpath
+            filename = full_row["filename"]
+            #print(f"Job folder from cache: {folder_from_cache}")
+            # combine folderpath and filename as a path 
+            file_path = Path(folderpath) / filename
+
+            preview_df = self.extract_service.preview_with_header(
+                file_path=file_path,
+                sheet_name=objectname,
+                header_row=header_row
+            )
+
+            cols: List[Dict]
+            rows: List[Dict]
+
+            # Cols needs to have the Column names as COLUMN_NAME in the dict
+            cols = [{'COLUMN_NAME': col} for col in preview_df.columns]
+            # rows is a list of data row dicts
+            rows = [dict(zip(preview_df.columns, row)) for row in preview_df.values.tolist()]
+
+            editable = False
+            #print(f"Preview DataFrame loaded with columns: {cols} and number of rows: {len(rows)}")
+            self.preview_grid.load_data(rows=rows, columns=cols, editable=editable)

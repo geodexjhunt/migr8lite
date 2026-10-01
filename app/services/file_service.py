@@ -227,11 +227,11 @@ def process_datafile(db_service: DatabaseService,fp: Path,datafileid: int,ftype:
                 stagingtablename=stagingtablename,
                 read_fileobjectfields=read_fileobjectfields,
                 read_objects_fn=lambda: _read_text_objects(fp=fp, datafileid=datafileid),
-                read_fields_fn=lambda _name, dfoid: _read_text_fields(
+            read_fields_fn=lambda _object_name, dfoid: _read_text_fields(
                     fp=fp, datafileobjectid=dfoid
                 ),
-                read_header_fn=lambda fp, dfoid: _read_text_header_row(
-                        text_file=fp, datafileobjectid=dfoid, db_service=db_service,
+                read_header_fn=lambda _object_name, dfoid: _read_text_header_row(
+                        fp=fp, datafileobjectid=dfoid, db_service=db_service,
                     ),
                 defaultrownumber=1,
             )
@@ -456,7 +456,7 @@ def _read_text_fields(fp: Path, datafileobjectid: int) -> list[DataFileObjectFie
 
     return fields
 
-def _read_text_header_row(text_file: str,datafileobjectid: int,db_service: "DatabaseService") -> list[DataFileObjectFieldHeader]:
+def _read_text_header_row(fp: Path,datafileobjectid: int,db_service: "DatabaseService") -> list[DataFileObjectFieldHeader]:
     """
     Read the header row for a text file and map column ordinals to field names.
     
@@ -468,7 +468,7 @@ def _read_text_header_row(text_file: str,datafileobjectid: int,db_service: "Data
     header_row_number = _get_or_set_header_row_number(datafileobjectid, db_service)
     
     # Read the text file with no header assumption
-    df = load_text_file_to_dataframe(text_file, drop_all_null_columns=True, log_fn = None)
+    df = load_text_file_to_dataframe(fp, drop_all_null_columns=True, log_fn = None)
     
     # Extract the header row (convert 1-indexed to 0-indexed)
     header_row_values = _get_header_row_from_dataframe(df, header_row_number)
@@ -525,7 +525,7 @@ def _generate_sanitised_field_mapping(datafileobjectid: int,header_row_values: l
     # Convert to ordinal-keyed dict for generate_column_names
     header_dict: Dict[int, Dict] = {
         i: {"OrigFieldName": val}
-        for i, val in enumerate(header_row_values)
+        for i, val in enumerate(header_row_values, start=1)
     }
     
     # Generate sanitized + de-duped names
@@ -536,7 +536,7 @@ def _generate_sanitised_field_mapping(datafileobjectid: int,header_row_values: l
 
     for ordinal, field_info in header_dict.items():
 
-        field = db_service.get_datafileobjectfield_by_ordinal(datafileobjectid, ordinal)
+        field = db_service.get_datafileobjectfield_by_objectid_and_ordinal(datafileobjectid, ordinal)
         fieldid = field.datafileobjectfieldid
         orig = field_info["OrigFieldName"]
         new = field_info["SanitizedFieldName"]
@@ -703,7 +703,7 @@ def infer_series_type(series: pd.Series, date_format_label: str = "Auto") -> Dic
     if fmt is None:
         # Auto mode (less strict)
         #print ("Auto date parsing")
-        dt_try = pd.to_datetime(non_null, errors="coerce")
+        dt_try = pd.to_datetime(non_null, errors="coerce", format="mixed")
     else:
         # Strict selected format
         #print ("Fromatted date parsing")
@@ -741,7 +741,7 @@ def parse_dates_with_order(non_null: pd.Series, fmt: str):
         return pd.to_datetime(s, format=fmt, errors="coerce")
 
     # Auto mode fallback
-    return pd.to_datetime(s, errors="coerce")
+    return pd.to_datetime(s, errors="coerce", format="mixed")
 
 def normalize_date_separators(s: pd.Series) -> pd.Series:
     # convert / or . to -, collapse repeats, trim
@@ -751,7 +751,7 @@ def normalize_date_separators(s: pd.Series) -> pd.Series:
     return out
 
 ####################################
-## Text file loading helpers
+## File to dataframe loadersrs
 ####################################
 
 def load_text_file_to_dataframe(file_path: Path, drop_all_null_columns: bool = True, log_fn=None) -> pd.DataFrame:
@@ -792,6 +792,9 @@ def load_text_file_to_dataframe(file_path: Path, drop_all_null_columns: bool = T
     df = df.replace(r"^\s*$", pd.NA, regex=True)
 
     # Sanitize/uniquify columns
+    # We don't need to do this as we aren't detecting headers at this point anymore.  
+    # header = None in the above read_csv calls
+    """
     seen = {}
     new_cols = []
     for i, c in enumerate(df.columns, start=1):
@@ -804,6 +807,7 @@ def load_text_file_to_dataframe(file_path: Path, drop_all_null_columns: bool = T
             name = base
         new_cols.append(name)
     df.columns = new_cols
+    """
 
     if drop_all_null_columns:
         # drop columns that are entirely null
@@ -813,6 +817,37 @@ def load_text_file_to_dataframe(file_path: Path, drop_all_null_columns: bool = T
 
 
     return df
+
+def load_excel_sheet_to_dataframe(file_path: Path, sheet_name: str, dtype: dict | None = None) -> pd.DataFrame:
+    """
+    Stand alone method for loading an Excel sheet into a pandas DataFrame with no header - i.e. raw.
+    """
+    ext = file_path.suffix.lower()
+    engine_map = {
+        ".xls": "xlrd",
+        ".xlsx": "openpyxl", ".xlsm": "openpyxl",
+        ".xltx": "openpyxl", ".xltm": "openpyxl",
+        ".xlsb": "pyxlsb",
+    }
+    engine = engine_map.get(ext)
+    if engine is None:
+        print(f"⚠️ Unsupported Excel extension for {file_path.name}: {ext}")
+        
+    return pd.read_excel(file_path, sheet_name=sheet_name, dtype=dtype, keep_default_na=True, header=None)
+
+def load_access_table_to_dataframe(file_path: Path, table_name: str, dtype: dict | None = None) -> pd.DataFrame:
+    """
+    Stand alone method for loading an Access table into a pandas DataFrame with no header - i.e. raw.
+    """
+    with _open_access_connection(file_path) as conn:
+        query = f"SELECT * FROM [{table_name}]"
+        df = pd.read_sql(query, conn)
+    return df
+
+####################################
+## Text file loading helpers
+####################################
+
 
 def read_csv_with_fallback(path, **kwargs):
     encodings = ["utf-8-sig", "utf-8", "cp1252", "latin-1"]
@@ -855,6 +890,10 @@ def get_operable_filetypes() -> Dict[str, dict]:
             "subtype": meta.get("subtype"),
         }
     return out
+
+
+
+
 
 
 ############# Methods below this line added for extraction
