@@ -1,12 +1,13 @@
 from multiprocessing import context
 
 from pathlib import Path
-from app.models.system_model import DataFileObjectHeaderRow, JobFolder
+from collections import defaultdict
+from app.models.system_model import DataFileObjectHeaderRow, ExistingTablePolicy, JobFolder, IssueType, TableExtractRequest, ExtractResult
 from app.services.extract_service import ExtractService
 from config.config import Config
 from PyQt6.QtWidgets import (
-    QCheckBox, QSplitter, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTreeWidget, QTreeWidgetItem,
-    QPushButton, QMessageBox,
+    QCheckBox, QSplitter, QTextEdit, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTreeWidget, QTreeWidgetItem,
+    QPushButton, QMessageBox,QDialog
 )
 from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtCore import Qt
@@ -323,13 +324,18 @@ class ExtractTab(QWidget):
 
         return all_tables
 
+
+    # ------------------------------------------------------------------
+    #  Button Handling
+    # ------------------------------------------------------------------
+
     def _on_extract_all_clicked(self) -> None:
         selected_tables = self.get_all_unique_tables()
-
-        # TODO: replace with real extraction logic
-        print(f"DEBUG: Extracting all {len(selected_tables)} table(s):")
-        for row in selected_tables:
-            print(f"  - {row.get('objectname')} ({row.get('stagingtablename')})")
+        if not selected_tables:
+            QMessageBox.information(self, "No Selection", "No tables are available for extraction.")
+            return
+        else:
+            self._extract_tables(selected_tables)
 
     def _on_extract_selected_clicked(self) -> None:
         selected_tables = self.get_selected_tables()
@@ -337,11 +343,10 @@ class ExtractTab(QWidget):
         if not selected_tables:
             QMessageBox.information(self, "No Selection", "No tables are selected for extraction.")
             return
+        else:
+            self._extract_tables(selected_tables)
 
-        # TODO: replace with real extraction logic
-        print(f"DEBUG: Extracting {len(selected_tables)} selected table(s):")
-        for row in selected_tables:
-            print(f"  - {row.get('objectname')} ({row.get('stagingtablename')})")
+
 
     # ------------------------------------------------------------------
     #  Table Preview Generation
@@ -367,8 +372,7 @@ class ExtractTab(QWidget):
                     if isinstance(child_data, dict) and child_data.get("level") == "table":
                         self.extract_details_label.setText(f"Selected: {child_data.get('objectname', 'Unknown')}")
                         self._load_preview(child_data)
-            
-
+           
     def _on_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         #print("On Item clicked fired")
         data = item.data(0, Qt.ItemDataRole.UserRole)
@@ -446,3 +450,110 @@ class ExtractTab(QWidget):
                 bottom_rows=bottom_rows,
                 bottom_editable=editable  # For preview; set True for actual import
             )
+
+    # ------------------------------------------------------------------
+    #  Table Extraction
+    # ------------------------------------------------------------------
+
+    def _extract_tables(self, tables: list[dict]) -> None:
+        # ---- Group by jobfileid (this has alreadt been resolved to a 1:1 relationship to datafileid) (dict preserves first-seen order) ----
+        by_file: dict[int, list[dict]] = defaultdict(list)
+        for table in tables:
+            by_file[table.get("jobfileid")].append(table)
+
+        # ---- Phase 1: pre-flight + decisions (GUI thread, nothing is extracted yet) ----
+        remembered_policy: ExistingTablePolicy | None = None  # set by an "ALL" button
+        plan: dict[int, list[TableExtractRequest]] = {}
+
+        for jobfileid, file_tables in by_file.items():
+            requests: list[TableExtractRequest] = []
+
+            for table in file_tables:
+
+                policy = ExistingTablePolicy.NOT_SET
+                pre = self.extract_service.check_table(table)
+
+                if IssueType.TABLE_EXISTS in pre.issues:
+                    if remembered_policy is not None:
+                        policy = remembered_policy
+                    else:
+                        choice = self._ask_existing_table(table, offer_all=len(tables) > 1)
+                        if choice is None:
+                            return  # user cancelled: nothing has been extracted
+                        policy, apply_all = choice
+                        if apply_all:
+                            remembered_policy = policy
+
+                requests.append(
+                    TableExtractRequest(
+                        datafileobjectid=table.get("datafileobjectid"),
+                        existing_policy=policy,
+                        stagingtablename=table.get("stagingtablename"),
+                        stagingtableschema=table.get("stagingtableschema"),
+                    )
+                )
+
+            plan[jobfileid] = requests
+
+        # ---- Phase 2: one process_file call per file ----
+        summary: list[tuple[int, TableExtractRequest, ExtractResult]] = []
+        for jobfileid, requests in plan.items():
+            results = self.extract_service.process_file(jobfileid, requests)
+            summary.extend(zip([jobfileid] * len(requests), requests, results))
+
+        self._show_summary(summary)
+
+    def _ask_existing_table(self, table: dict, offer_all: bool = True):
+        """Returns (policy, apply_all) or None if cancelled."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Table already exists")
+        box.setText(
+            f"Staging table '{table.get('stagingtablename')}' already exists "
+            f"(source object: {table.get('objectname')}).\n\nWhat should happen?"
+        )
+
+        R = QMessageBox.ButtonRole
+        buttons = {
+            box.addButton("Skip", R.ActionRole): (ExistingTablePolicy.SKIP, False),
+            #box.addButton("Append", R.ActionRole): (ExistingTablePolicy.APPEND, False),
+            box.addButton("Replace", R.ActionRole): (ExistingTablePolicy.REPLACE, False),
+        }
+        if offer_all:
+            buttons.update({
+                box.addButton("Skip All", R.ActionRole): (ExistingTablePolicy.SKIP, True),
+                #box.addButton("Append All", R.ActionRole): (ExistingTablePolicy.APPEND, True),
+                box.addButton("Replace All", R.ActionRole): (ExistingTablePolicy.REPLACE, True),
+            })
+        cancel = box.addButton("Cancel", R.RejectRole)
+        box.setEscapeButton(cancel)
+
+        box.exec()
+        return buttons.get(box.clickedButton())  # None for Cancel or the window close button
+    
+    def _show_summary(self, summary: list[tuple[int, TableExtractRequest, ExtractResult]]):
+        """Display a summary of extraction results to the user."""
+        # Implement the summary display logic here, e.g., using a QMessageBox or a custom dialog.
+        if not summary:
+            QMessageBox.information(self, "Extraction Summary", "No extraction results to display.")
+            return
+
+        self.extract_summary = QDialog(self)
+
+        message = ""
+        for datafileid, request, result in summary:
+            message += f"DataFile ID: {datafileid}\n"
+            message += f"Request: {request}\n"
+            message += f"Result: {result}\n"
+            message += "-" * 40 + "\n"
+
+        layout = QVBoxLayout()
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setText(message)#
+        text_edit.setMaximumHeight(600)
+        text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        layout.addWidget(text_edit)
+        self.extract_summary.setLayout(layout)
+        self.extract_summary.setWindowTitle("Extraction Summary")
+        self.extract_summary.exec()

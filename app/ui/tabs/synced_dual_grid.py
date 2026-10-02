@@ -143,8 +143,8 @@ class SyncedDualGrid(QWidget):
             bottom_editable: Whether bottom grid is editable
         """
         print("Loading data into synced dual grid")
-        print(f"Top columns: {top_columns}")
-        print(f"Bottom columns: {bottom_columns}")
+        #print(f"Top columns: {top_columns}")
+        #print(f"Bottom columns: {bottom_columns}")
 
         # Temporarily block resize signals to avoid cross-grid triggering during initial load
         self.top_grid.horizontalHeader().blockSignals(True)

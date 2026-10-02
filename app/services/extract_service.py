@@ -1,10 +1,12 @@
 
+import traceback
+
 import pandas as pd
 import re
-from typing import Dict
+from typing import Dict, List
 from pathlib import Path
 from app.constants import SQLSERVER_MAX_IDENTIFIER_LEN
-from app.models.system_model import DataFileObject
+from app.models.system_model import DataFileObject, ExistingTablePolicy, ExtractResult, ExtractStatus, IssueType, PreflightResult, TableExtractRequest
 from app.services.file_service import *
 from app.services.db_service import DatabaseService
 from app.models.migration_context import MigrationContext
@@ -39,18 +41,147 @@ class ExtractService(QObject):
         self._create_staging_table_if_needed(schema, table_name, df)
         self._write_dataframe_to_table(schema, table_name, df)
 
-    def extract_selected(self, datafileobjects: list[DataFileObject]) -> None:
-        """Extract multiple selected objects, e.g. from ExtractTab checkboxes."""
-        for obj in datafileobjects:
-            self.extract_object(obj)
+    def check_table(self, table: Dict[str, Any]) -> PreflightResult:
+        """Read-only: detect problems without changing anything."""
+        schema = table["stagingtableschema"]
+        table_name = table["stagingtablename"]
+        try:
+            exists = self.db_service.table_exists(schema, table_name)
+        except Exception as exc:
+            return PreflightResult(issues=[IssueType.CHECK_FAILED], detail=str(exc))
+        result = PreflightResult()
+        if exists:
+            result.issues.append(IssueType.TABLE_EXISTS)
+            result.detail = f"{schema}.{table_name} already exists"
+        return result
 
-    def _create_staging_table_if_needed(self, schema: str, table_name: str, df) -> None:
-        ...
+    def process_file(self,jobfileid: int,requests: List[TableExtractRequest]) -> List[ExtractResult]:
+        """Open the datafile ONCE, extract each requested object using its own policy.
+        Never prompts. Returns one ExtractResult per request, in the same order.
+        A failure on one table should be captured in its result, not abort the rest."""
 
-    def _write_dataframe_to_table(self, schema: str, table_name: str, df) -> None:
-        ...
+        results: List[ExtractResult] = []
+        to_extract: List[TableExtractRequest] = []
+
+        jobfile = self.db_service.get_jobfile_by_id(jobfileid)
+        jobfolder = self.db_service.get_jobfolder_by_id(jobfile.folderid)
+        filepath = Path(jobfolder.folderpath) / jobfile.filename
+        ftype, subtype  = get_ftype_subtype_from_path(filepath)
+        
+        if not jobfile:
+            raise ValueError(f"JobFile with ID {jobfileid} not found")
+        if not jobfolder:
+            raise ValueError(f"JobFolder with ID {jobfile.folderid} not found") 
 
 
+        for request in requests:
+            if request.existing_policy == ExistingTablePolicy.NOT_SET:
+                # No conflict detected; proceed with APPEND or REPLACE as your default
+                request.existing_policy = ExistingTablePolicy.REPLACE
+                to_extract.append(request)
+            elif request.existing_policy == ExistingTablePolicy.ABORT:
+                results.append(ExtractResult(
+                    status=ExtractStatus.SKIPPED,
+                    message="Table exists; operation aborted per policy"
+                ))
+            elif request.existing_policy == ExistingTablePolicy.SKIP:
+                results.append(ExtractResult(
+                    status=ExtractStatus.SKIPPED,
+                    message="User skipped this table"
+                ))
+            elif request.existing_policy == ExistingTablePolicy.APPEND:
+                results.append(ExtractResult(
+                    status=ExtractStatus.SKIPPED,
+                    message="This shouldn't be possible as removed from gui choices!"
+                ))
+            else:
+                # REPLACE OR NO VALUE BECAUSE NO CONFLICT
+                to_extract.append(request)
+
+        # Open the file once and extract the approved tables
+        if to_extract:
+            extracted: Dict[int, ObjectExtraction] 
+            extracted = process_datafile_for_extraction(
+                db_service=self.db_service,
+                fp=filepath,
+                ftype=ftype,
+                subtype=subtype,
+                requests=to_extract,
+            )
+            
+            # Write and collect results for extracted tables
+            for request in to_extract:
+                result = self._write_extracted_table(
+                    request=request,
+                    df=extracted.get(request.datafileobjectid).df if extracted.get(request.datafileobjectid) else None,
+                )
+                results.append(result)
+
+        return results
+
+    def _write_extracted_table(self, request: TableExtractRequest, df: pd.DataFrame | None) -> ExtractResult:
+        """
+        Write the extracted table to the database or storage.
+        """
+        # Skip and Abort have already been removed - so all remaining calls to this method assume drop and re-create table.
+
+
+        try:
+            if df is None:
+                return ExtractResult(
+                    status=ExtractStatus.FAILED,
+                    message=f"Failed to write extracted table: Dataframe is None"
+                    )
+    
+            header_values = {}
+            for idx, val in enumerate(df.columns.tolist()):
+                header_values[idx] = {"OrigFieldName": val}
+            generated  = generate_column_names(header_values)  # your existing UnknownCol# logic
+
+            # Plain list of strings, 0-based, in column order
+            column_names: list[str] = [generated[i]["SanitizedFieldName"] for i in range(len(df.columns))]
+
+            self.db_service.drop_table_if_exists(request.stagingtablename, request.stagingtableschema)  
+
+            col_types_from_pd = infer_dataframe_sql_types_from_pandas(df, date_format_label="Auto") 
+
+            col_types_to_create: Dict[str, str] = {
+                column_names[idx - 1]: col_type["sql_type"]
+                for idx, col_type in col_types_from_pd.items()
+            }
+
+            # Apply sanitized names to the DataFrame
+            df.columns = column_names
+
+            self.db_service.create_table(
+                table_name=request.stagingtablename,
+                col_types=col_types_to_create,
+                schema=request.stagingtableschema
+            )
+
+            self.db_service.insert_dataframe(
+                table_name=request.stagingtablename,
+                df=df,
+                schema=request.stagingtableschema
+            )
+
+            # Implement the actual writing logic here
+            # For now, just return a success result
+            return ExtractResult(
+                status=ExtractStatus.SUCCESS,
+                message="Table Dropped, Created, Extracted and written successfully"
+            )
+        except Exception as e:
+            traceback.print_exc()
+            return ExtractResult(
+                status=ExtractStatus.FAILED,
+                message=f"Failed to write extracted table: {type(e).__name__}: {e!r}"
+                #message=f"Failed to write extracted table: {e}"
+            )
+
+    # ------------------------------------------------------------------
+    #  Preview Methods
+    # ------------------------------------------------------------------
 
     def apply_header_row(self, df: pd.DataFrame, header_row: int) -> tuple[pd.DataFrame, pd.DataFrame]:
         """

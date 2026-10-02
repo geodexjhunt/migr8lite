@@ -1,9 +1,10 @@
 """System data model and registry definitions."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import Enum, auto
 from typing import Any, Dict, List, Optional
+import pandas as pd
 
 class WorkflowPhase(str, Enum):
     DEFINE = "a_define"
@@ -303,3 +304,55 @@ class RegistryManager:
     def is_system_table(sql_table: str) -> bool:
         sql_table_lower = sql_table.lower()
         return any(reg.sql_table.lower() == sql_table_lower for reg in SYSTEM_TABLES.values())
+
+
+####### ExtractService required these classes below:
+
+class ExistingTablePolicy(Enum):
+    NOT_SET = auto()
+    ABORT = auto()      # default: do nothing if the table exists
+    SKIP = auto()
+    APPEND = auto()
+    REPLACE = auto()    # drop and recreate
+
+
+class IssueType(Enum):
+    TABLE_EXISTS = auto()
+    # add others as they appear (e.g. NO_HEADER_ROW, DUPLICATE_COLUMNS)
+
+
+@dataclass
+class PreflightResult:
+    issues: List[IssueType] = field(default_factory=list)
+    detail: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return not self.issues
+
+
+class ExtractStatus(Enum):
+    SUCCESS = auto()
+    SKIPPED = auto()
+    FAILED = auto()
+
+
+@dataclass
+class ExtractResult:
+    status: ExtractStatus
+    message: str = ""
+    rows_loaded: int = 0
+
+@dataclass
+class TableExtractRequest:
+    datafileobjectid: int
+    stagingtablename: str
+    stagingtableschema: str
+    existing_policy: ExistingTablePolicy = ExistingTablePolicy.NOT_SET
+
+
+
+@dataclass
+class ObjectExtraction:
+    df: pd.DataFrame | None = None
+    error: str | None = None

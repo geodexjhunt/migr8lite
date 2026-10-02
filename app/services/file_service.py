@@ -10,10 +10,10 @@ import re
 import time
 from datetime import datetime, date
 from tkinter.font import names
-from typing import Any, Dict, Callable, Optional
+from typing import Any, Dict, Callable, List, Optional
 from arrow import ParserError
 import pandas as pd 
-from app.models.system_model import DataFile, DataFileObject, DataFileObjectField,DataFileObjectFieldHeader,DataFileObjectHeaderRow
+from app.models.system_model import DataFile, DataFileObject, DataFileObjectField,DataFileObjectFieldHeader,DataFileObjectHeaderRow, ObjectExtraction, TableExtractRequest
 from app.services.db_service import DatabaseService
 import pyodbc
 from app.constants import DEFAULT_SETTINGS, SQLSERVER_MAX_IDENTIFIER_LEN
@@ -151,6 +151,7 @@ def _open_access_connection(fp: Path):
 ####################################
 ####################################
 ## Main datafile processing function
+## for reading objects and fields and header rows
 
 def process_datafile(db_service: DatabaseService,fp: Path,datafileid: int,ftype: str,subtype: str,read_fileobjectfields: bool = True,datafileobjecttemplate: DataFileObject | None = None,) -> tuple[list[DataFileObject], list[DataFileObjectField]]:
     """
@@ -612,6 +613,7 @@ def sanitize_column_name(col: str, fallback_idx: int) -> str:
     if not c:
         c = f"UnkCol_{fallback_idx}"
     return c
+
 ## End of helper functions for handling header rows in text files
 
 def get_fields_from_dataframe(df: pd.DataFrame, datafileobjectid: int) -> list[DataFileObjectField]:
@@ -751,32 +753,145 @@ def normalize_date_separators(s: pd.Series) -> pd.Series:
     return out
 
 ####################################
+####################################
+## Main datafile processing function
+## for reading objects and fields and header rows
+
+def process_datafile_for_extraction(db_service: DatabaseService,fp: Path,ftype: str,subtype: str, requests: List[TableExtractRequest] ) -> Dict[int,ObjectExtraction]:
+    """
+    Opens a file and orchestrates the extraction of requested tables/objects into DataFrames.
+    """
+
+    try:
+        if ftype == "excel":
+            ext = fp.suffix.lower()
+            engine_map = {
+                ".xls": "xlrd",
+                ".xlsx": "openpyxl", ".xlsm": "openpyxl",
+                ".xltx": "openpyxl", ".xltm": "openpyxl",
+                ".xlsb": "pyxlsb",
+            }
+            engine = engine_map.get(ext)
+            if engine is None:
+                print(f"⚠️ Unsupported Excel extension for {fp.name}: {ext}")
+                return {}
+
+            with pd.ExcelFile(fp, engine=engine) as excel_file:
+                return _extract_objects_common(
+                    db_service=db_service,
+                       requests=requests,
+                    extract_objects_fn=lambda sheet_name, header_row_number: _extract_excel_to_df(
+                        excel_file=excel_file, sheet_name=sheet_name,
+                        header_row_number=header_row_number
+                    ),
+                    
+                )
+
+        elif ftype == "database" and subtype == "access":
+            with _open_access_connection(fp) as acc_conn:
+                acc_conn.autocommit = True
+                return _extract_objects_common(
+                    db_service=db_service,
+                    requests=requests,
+                    extract_objects_fn=lambda table_name, _nothing : _extract_access_to_df(
+                        connection=acc_conn, table_name=table_name
+                    ),
+                        
+                )
+
+        elif ftype == "text":
+            return _extract_objects_common(
+                db_service=db_service,
+                requests=requests,
+                extract_objects_fn=lambda _object_name, header_row_number: _extract_text_to_df(
+                        file_path=fp, header_row_number=header_row_number
+                    ),
+                
+            )
+
+        else:
+            raise ValueError(f"Unsupported file type: {ftype}")
+
+    except Exception as e:
+        print(f"Error processing datafile {fp}: {e}")
+        return {}
+
+## Common orchestration logic for extract datafile objects
+def _extract_objects_common(db_service: DatabaseService, requests: List[TableExtractRequest] ,extract_objects_fn: Callable[[str, int], pd.DataFrame]
+                            ) -> Dict[int,ObjectExtraction]:
+    """
+    Shared orchestration logic for extracting datafile objects/
+
+    """
+    results: Dict[int, ObjectExtraction] = {}
+
+    for request in requests:
+        datafileobjectid = request.datafileobjectid
+        try:
+            datafileobject = db_service.get_datafileobject_by_id(datafileobjectid)  
+            header_rows = db_service.get_datafileheaderrow_objects_by_datafileobjectid(datafileobjectid)
+            header_row_number = (header_rows[0].rownumber - 1) if header_rows else 0
+
+            sheet_name = datafileobject.objectname
+
+            df=extract_objects_fn(sheet_name, header_row_number)
+            results[datafileobjectid] = ObjectExtraction(df=df)
+            
+        except Exception as e:
+            print(f"Error extracting datafile object {datafileobjectid}: {e}")
+            results[request.datafileobjectid] = ObjectExtraction(df=None,error=str(e))
+
+    return results
+
+def _extract_excel_to_df(excel_file: pd.ExcelFile,sheet_name: str, header_row_number: int ) -> pd.DataFrame:
+    """
+    Read the header row for a sheet and return the dataframe.
+    
+    - Queries DB to get the current header_row_number (defaults to 1 if not set)
+    - Reads that row from the sheet
+    - Generates sanitized names and de-duplication
+    - Returns the dataframe with the correct header row applied
+    """
+    
+    return excel_file.parse(sheet_name=sheet_name, header=header_row_number, dtype=str)
+
+def _extract_access_to_df(connection: pyodbc.Connection,table_name: str) -> pd.DataFrame:
+    """Read column names from tables in an already-open Access connection."""
+    fields: list[DataFileObjectField] = []
+
+    try:
+        df = pd.read_sql(f"SELECT * FROM [{table_name}] ", connection)
+ 
+    except Exception as e:
+        print(f"Error reading Access table {table_name}: {e}")
+
+    return df
+
+def _extract_text_to_df(file_path: Path, header_row_number: int ) -> pd.DataFrame:
+    """Read a text file into a single-column dataframe."""
+    df = load_text_file_to_dataframe(file_path, drop_all_null_columns=True,  log_fn = None, header=header_row_number)
+    return df
+
+####################################
 ## File to dataframe loadersrs
 ####################################
 
-def load_text_file_to_dataframe(file_path: Path, drop_all_null_columns: bool = True, log_fn=None) -> pd.DataFrame:
+def load_text_file_to_dataframe(file_path: Path, drop_all_null_columns: bool = True, log_fn=None, header=None) -> pd.DataFrame:
     """
     Basic parser:
     - .csv => read_csv
     - .tsv/.txt => read_csv with inferred sep (python engine, sep=None)
     - .xlsx/.xls => read_excel ## we don't do this anymore in this method
     """
-    operable = get_operable_filetypes()
-    ext_path = file_path.suffix.lower().lstrip(".").rstrip()
-    meta = operable.get(ext_path)
-    if meta is None:
-        raise ValueError(f"Unsupported extension for parser: {ext_path}")
-    
-    ftype = (meta.get("type") or "").lower()
-    subtype = (meta.get("subtype") or "").lower()
+    ftype, subtype  = get_ftype_subtype_from_path(file_path)
 
     try:
         if ftype == "text" and subtype == "csv":
-            df, used_enc = read_csv_with_fallback(file_path, dtype=str, keep_default_na=True, header=None)
+            df, used_enc = read_csv_with_fallback(file_path, dtype=str, keep_default_na=True, header=header)
         elif ftype == "text":
-            df, used_enc = read_csv_with_fallback(file_path, dtype=str, sep=None, engine="python", keep_default_na=True, header=None)
+            df, used_enc = read_csv_with_fallback(file_path, dtype=str, sep=None, engine="python", keep_default_na=True, header=header)
         else:
-            raise ValueError(f"Unsupported extension for parser: {ext_path}")
+            raise ValueError(f"Unsupported extension for parser: {file_path.suffix.lower().lstrip('.')}")
     except ParserError:
         df, used_enc = read_text_lines_fallback(file_path)
         if log_fn:
@@ -848,7 +963,6 @@ def load_access_table_to_dataframe(file_path: Path, table_name: str, dtype: dict
 ## Text file loading helpers
 ####################################
 
-
 def read_csv_with_fallback(path, **kwargs):
     encodings = ["utf-8-sig", "utf-8", "cp1252", "latin-1"]
     last_err = None
@@ -891,10 +1005,13 @@ def get_operable_filetypes() -> Dict[str, dict]:
         }
     return out
 
-
-
-
-
+def get_ftype_subtype_from_path(file_path: Path) -> tuple[str | None, str | None]:
+    ext = file_path.suffix.lower().lstrip(".")
+    operable = get_operable_filetypes()
+    meta = operable.get(ext)
+    if not meta:
+        return None, None
+    return (meta.get("type") or "").lower(), (meta.get("subtype") or "").lower()
 
 ############# Methods below this line added for extraction
 

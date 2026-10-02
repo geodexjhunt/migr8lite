@@ -30,18 +30,19 @@ class MainWindow(QMainWindow):
         self._connect_database()
         self._update_database_info_cache()
 
-        self.db_service.refresh_job_cache()
-        self.db_service.refresh_jobrunversion_cache()
-        self.db_service.refresh_table_cache()
-        self.db_service.refresh_datafile_cache()
-        self.db_service.refresh_datafileobject_cache()
-        self.db_service.refresh_datafileobjectfield_cache() 
-        self.db_service.refresh_datafileobjectfieldheader_cache()
-        self.db_service.refresh_datafileobjectheaderrow_cache()
+        # all refreshing now in the above call to _update_database_info_cache()
+        #self.db_service.refresh_job_cache()
+        #self.db_service.refresh_jobrunversion_cache()
+        #self.db_service.refresh_table_cache()
+        #self.db_service.refresh_datafile_cache()
+        #self.db_service.refresh_datafileobject_cache()
+        #self.db_service.refresh_datafileobjectfield_cache() 
+        #self.db_service.refresh_datafileobjectfieldheader_cache()
+        #self.db_service.refresh_datafileobjectheaderrow_cache()
 
-        if self.context.current_jobrunversionid is not None:
-            self.db_service.refresh_jobfolder_cache(self.context.current_jobrunversionid)
-            self.db_service.refresh_jobfile_cache(self.context.current_jobrunversionid)
+        #if self.context.current_jobrunversionid is not None:
+        #    self.db_service.refresh_jobfolder_cache(self.context.current_jobrunversionid)
+        #    self.db_service.refresh_jobfile_cache(self.context.current_jobrunversionid)
 
         self.setWindowTitle(app_config.get("title", "migr8lite"))
         self.icon = QIcon(app_config.get("window_icon", None))
@@ -60,9 +61,15 @@ class MainWindow(QMainWindow):
         if self.db_service._connection:
             self.db_service.refresh_table_cache()
             self.db_service.refresh_datafile_cache()
+            self.db_service.refresh_job_cache()
+            self.db_service.refresh_jobrunversion_cache()
             if self.context.current_jobrunversionid is not None:
                 self.db_service.refresh_jobfolder_cache(self.context.current_jobrunversionid)
                 self.db_service.refresh_jobfile_cache(self.context.current_jobrunversionid)
+            self.db_service.refresh_datafileobject_cache()
+            self.db_service.refresh_datafileobjectfield_cache() 
+            self.db_service.refresh_datafileobjectfieldheader_cache()
+            self.db_service.refresh_datafileobjectheaderrow_cache()
    
     def _setup_ui(self) -> None:
         central_widget = QWidget()

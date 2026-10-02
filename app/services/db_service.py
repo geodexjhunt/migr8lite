@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 import pyodbc
 from pathlib import Path
+import pandas as pd
 
 
 from app.models.system_model import DataFileObject, DataFile, DataFileObjectField, JobFile, JobFolder, JobRunVersion, Job, DataFileObjectFieldHeader, DataFileObjectHeaderRow   
@@ -159,14 +160,70 @@ class DatabaseService(QObject):
             return dict(zip(columns, row)) if row else None
 
     def execute_dml(self,query: str,params: Optional[tuple] = None ) -> int:
-        """Execute INSERT, UPDATE, or DELETE and return the affected row count."""
+        """Execute INSERT, UPDATE, DELETE or DDL. Returns rowcount (-1 for DDL).
+        Raises on failure."""
+        print(f"DEBUG: Executing DML: {query} with params: {params or ()}" )
         try:
             with self.get_cursor() as cursor:
-                #print(f"DEBUG: Pre-Execute DML: {query} with params: {params or ()}")
                 cursor.execute(query, params or ())
-                return cursor.rowcount       
+                return cursor.rowcount
         except pyodbc.Error as e:
-            print(f"DEBUG: DML execution failed with error:{e}")
+            print(f"DEBUG: DML execution failed with error: {e}")
+            raise
+
+    ################################
+    ###
+    ### DANGEROUS SQL METHODS
+    ###
+    ################################
+
+    def create_table_sql(self,table_name: str, col_types: Dict[str, str], schema: str ) -> str:
+        cols_sql = []
+        for col, sql_type in col_types.items():
+            cols_sql.append(f"[{col}] {sql_type} NULL")
+        cols_joined = ",\n    ".join(cols_sql)
+        return f"CREATE TABLE [{schema}].[{table_name}] (\n    {cols_joined}\n);"
+
+    def create_table(self, table_name: str, col_types: Dict[str, str], schema: str ):
+        sql = self.create_table_sql(table_name, col_types, schema)
+        self.execute_dml(sql)  # raises on failure
+        self.add_table_to_table_cache(table_name, schema)
+
+    def drop_table_if_exists(self, table_name: str, schema: str ):
+        sql = f"IF OBJECT_ID('[{schema}].[{table_name}]', 'U') IS NOT NULL DROP TABLE [{schema}].[{table_name}]"
+        self.execute_dml(sql)
+        self.remove_table_from_table_cache(table_name, schema)
+
+    def drop_table(self, table_name: str, schema: str ):
+        sql = f"DROP TABLE [{schema}].[{table_name}]"
+        self.execute_dml(sql)
+
+    def insert_dataframe(self, table_name: str, df: pd.DataFrame, schema: str ):
+        if df.empty:
+            return
+        with self.get_cursor() as cursor:
+            cols = list(df.columns)
+            col_list = ", ".join(f"[{c}]" for c in cols)
+            placeholders = ", ".join("?" for _ in cols)
+            sql = f"INSERT INTO [{schema}].[{table_name}] ({col_list}) VALUES ({placeholders})"
+            print(sql)  # For debugging 
+            # Replace NaN with None for pyodbc
+            #rows = df.where(pd.notna(df), None).values.tolist()
+            rows = self.dataframe_to_pyodbc_rows(df)
+            if not rows:
+                return
+            cursor.fast_executemany = True
+            cursor.executemany(sql, rows)
+        
+
+    def dataframe_to_pyodbc_rows(self, df: pd.DataFrame):
+        # Convert pandas missing markers (pd.NA/NaN/NaT) to Python None
+        obj = df.astype(object)
+        # Normalize all pandas missing values to None
+        obj = obj.where(pd.notna(obj), None)
+        # Drop rows where every column is None
+        obj = obj[obj.notna().any(axis=1)]
+        return obj.values.tolist()
 
     def get_schemas_info(self) -> List[Dict]:
         query = "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA"
@@ -336,7 +393,6 @@ class DatabaseService(QObject):
             result[jobfileid] = row
         return result
 
-
     def save_migration_task(self, task_id: Optional[int], name: str, description: str, schemaname: str, jobprefix: str, status: str, purpose: str) -> int:
         """Save a migration task. If task_id is None, create a new task; otherwise, update the existing task."""
         try:
@@ -383,35 +439,9 @@ class DatabaseService(QObject):
             print(f"DEBUG: Traceback:\n{traceback.format_exc()}")
             self._connection.rollback()
             raise
+       
 
-    def refresh_table_cache(self) -> None:
-        """Re-query schema/table metadata and refresh the internal cache."""
-        if not self._connection:
-            self._user_defined_schemas = []
-            self._all_tables_info = []
-            self._table_lookup = set()
-            return
 
-        self._user_defined_schemas = self.get_user_defined_schemas_info()
-
-        schema_names = [
-            schema["SCHEMA_NAME"] for schema in self._user_defined_schemas
-        ]
-
-        self._all_tables_info = self.get_all_tables_info_for_schemas(
-            schema_names
-        )
-
-        self._table_lookup = {
-            (row["TABLE_SCHEMA"], row["TABLE_NAME"])
-            for row in self._all_tables_info
-        }
-
-        self.table_cache_changed.emit()
-        
-    def table_exists(self, schema: str, table_name: str) -> bool:
-        """Check whether a table exists, using the cached metadata."""
-        return (schema, table_name) in self._table_lookup
 
     def get_max_runversion(self, task_id: int) -> int | None:
         jobid = task_id
@@ -1181,9 +1211,54 @@ class DatabaseService(QObject):
 
         self.datafileobjectheaderrow_cache_changed.emit()
 
+    def refresh_table_cache(self) -> None:
+        """Re-query schema/table metadata and refresh the internal cache."""
+        if not self._connection:
+            self._user_defined_schemas = []
+            self._all_tables_info = []
+            self._table_lookup = set()
+            return
+
+        self._user_defined_schemas = self.get_user_defined_schemas_info()
+
+        schema_names = [
+            schema["SCHEMA_NAME"] for schema in self._user_defined_schemas
+        ]
+
+        self._all_tables_info = self.get_all_tables_info_for_schemas(
+            schema_names
+        )
+
+        self._table_lookup = {
+            (row["TABLE_SCHEMA"], row["TABLE_NAME"])
+            for row in self._all_tables_info
+        }
+
+        self.table_cache_changed.emit()
+
+    ################################
+    ###
+    ### EXISTS AND EXISTS-RELATED METHODS
+    ###
+    ################################
+
+    def table_exists(self, schema: str, table_name: str) -> bool:
+        """Check whether a table exists, using the cached metadata."""
+        if self._table_lookup is None:
+            self.refresh_table_cache()  
+            if (schema, table_name) in self._table_lookup:
+                return True
+        return False
+
     def jobfile_exists(self,datafile_id: int,jobrunversion_id: int) -> bool:
         """Check if a jobfile with the given composite key already exists."""
         return (datafile_id, jobrunversion_id) in self._jobfiles_by_composite_key
+
+    ################################
+    ###
+    ### GET and GET-RELATED METHODS
+    ###
+    ################################
 
     def get_jobfile(self,jobrunversion_id: int,folderid: int, filename: str) -> JobFile | None:
         """Retrieve a jobfile by datafileid and jobrunversionid."""
@@ -1194,7 +1269,11 @@ class DatabaseService(QObject):
     def get_jobfolder(self, folderid: int) -> JobFolder | None:
         """Retrieve a jobfolder by its ID."""
         return self._jobfolders_by_id.get(folderid)
-
+    
+    def get_jobfolder_by_id(self, folderid: int) -> JobFolder | None:
+        """Retrieve a jobfolder by its ID."""
+        return self._jobfolders_by_id.get(folderid)
+    
     def get_jobfile_by_id(self, jobfile_id: int) -> JobFile | None:
         """Retrieve a jobfile by its ID."""
         return self._jobfiles_by_id.get(jobfile_id)
@@ -1210,6 +1289,45 @@ class DatabaseService(QObject):
             for (dfoid, _), row in self._datafileobjectheaderrows_by_datafileobjectid_and_headernum.items()
             if dfoid == datafileobjectid
         ]
+
+    def get_job_by_id(self, task_id: int) -> Job:   
+        """Retrieve a jobfile by its ID."""
+        return self._jobs_by_id.get(task_id)    
+
+    def get_jobrunversion_by_id(self, jobrunversionid: int) -> JobRunVersion:
+        """Retrieve a JobRunVersion by its ID."""
+        return self._jobrunversion_by_id.get(jobrunversionid)
+
+    def get_datafileobjectfield_by_objectid_and_ordinal(self,datafileobjectid: int, ordinal: int) -> DataFileObjectField:
+        """Return a DataFileObjectField object by its datafileobjectid and ordinal."""
+        return self._datafileobjectfields_by_objectid_and_ordinal.get((datafileobjectid, ordinal))   
+
+    def get_datafileobjectfieldheader_by_fieldid_and_headernum(self, datafileobjectfieldid: int, headernum: int) -> DataFileObjectFieldHeader:
+        """Return a DataFileObjectFieldHeader object by its datafileobjectfieldid and headernum."""
+        return self._datafileobjectfieldheader_by_fieldid_and_headernum.get((datafileobjectfieldid, headernum))
+
+    def get_datafileobject_by_id(self, datafileobjectid: int) -> DataFileObject | None:
+        """Retrieve a DataFileObject by its ID."""
+        return self._datafileobjects_by_id.get(datafileobjectid)
+
+    def add_table_to_table_cache(self, table_name: str, schema: str) -> None:
+        """Add a table entry to the cache."""
+        self._all_tables_info.append({
+            "TABLE_SCHEMA": schema,
+            "TABLE_NAME": table_name,
+            "TABLE_TYPE": "BASE TABLE"  # or query the actual type if needed
+        })
+        self._table_lookup.add((table_name, schema))
+        self.table_cache_changed.emit()
+
+    def remove_table_from_table_cache(self, table_name: str, schema: str) -> None:
+        """Remove a table entry from the cache."""
+        self._all_tables_info = [
+            t for t in self._all_tables_info
+            if not (t["TABLE_SCHEMA"] == schema and t["TABLE_NAME"] == table_name)
+        ]
+        self._table_lookup.discard((table_name, schema))
+        self.table_cache_changed.emit() 
 
     def add_jobs_to_cache(self,jobs: list[Job]) -> None:
         """Add or update jobs in the cache."""
@@ -1291,21 +1409,6 @@ class DatabaseService(QObject):
 
         return Result
 
-    def get_job_by_id(self, task_id: int) -> Job:   
-        """Retrieve a jobfile by its ID."""
-        return self._jobs_by_id.get(task_id)    
-
-    def get_jobrunversion_by_id(self, jobrunversionid: int) -> JobRunVersion:
-        """Retrieve a JobRunVersion by its ID."""
-        return self._jobrunversion_by_id.get(jobrunversionid)
-
-    def get_datafileobjectfield_by_objectid_and_ordinal(self,datafileobjectid: int, ordinal: int) -> DataFileObjectField:
-        """Return a DataFileObjectField object by its datafileobjectid and ordinal."""
-        return self._datafileobjectfields_by_objectid_and_ordinal.get((datafileobjectid, ordinal))   
-
-    def get_datafileobjectfieldheader_by_fieldid_and_headernum(self, datafileobjectfieldid: int, headernum: int) -> DataFileObjectFieldHeader:
-        """Return a DataFileObjectFieldHeader object by its datafileobjectfieldid and headernum."""
-        return self._datafileobjectfieldheader_by_fieldid_and_headernum.get((datafileobjectfieldid, headernum))
 
  
     def normalize_path_key(self, pathlike) -> str:
