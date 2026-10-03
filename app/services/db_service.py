@@ -932,7 +932,7 @@ class DatabaseService(QObject):
         row = self.execute_returning_one(sql, params)
         if row is not None and row > 0:
             obj.datafileobjectheaderrowid = row
-            self.add_datafileobjectheaderrows_to_cache(obj)
+            self.add_datafileobjectheaderrows_to_cache([obj])
             return obj
         return None
 
@@ -950,7 +950,7 @@ class DatabaseService(QObject):
         )
         row = self.execute_dml(sql, params)
         if row is not None and row > 0:
-            self.add_datafileobjectheaderrows_to_cache(obj)
+            self.add_datafileobjectheaderrows_to_cache([obj])
             return obj
         return None
     
@@ -1246,8 +1246,8 @@ class DatabaseService(QObject):
         """Check whether a table exists, using the cached metadata."""
         if self._table_lookup is None:
             self.refresh_table_cache()  
-            if (schema, table_name) in self._table_lookup:
-                return True
+        if (schema, table_name) in self._table_lookup:
+            return True
         return False
 
     def jobfile_exists(self,datafile_id: int,jobrunversion_id: int) -> bool:

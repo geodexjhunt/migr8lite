@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, List, Dict
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -195,7 +195,17 @@ class DataExplorerTab(QWidget):
                     schema_item.removeChild(table_type_item)
             
             self.table_list.addTopLevelItem(schema_item)
-        
+
+        cache_item = QTreeWidgetItem(["Cache Items"])
+        self.table_list.addTopLevelItem(cache_item)
+
+        table_cache_item = QTreeWidgetItem(["Table Cache"])
+        table_info = {"Type": "Cache", "Name": "Table Cache"}
+        table_cache_item.setData(0, Qt.ItemDataRole.UserRole, table_info)
+        cache_item.addChild(table_cache_item)   
+
+
+
         self._set_status(f"Loaded {len(tables)} tables from {len(schemas_dict)} schemas")
        
 
@@ -207,6 +217,11 @@ class DataExplorerTab(QWidget):
             # Only process if it's a table item (has table_info), not a schema node
             if table_info is None:
                 return
+
+            if table_info.get("Type") == "Cache":
+                self._load_cache_to_grid(table_info.get("Name"))
+                return
+
 
             schema = table_info['TABLE_SCHEMA']
             table_name = table_info['TABLE_NAME']
@@ -246,6 +261,31 @@ class DataExplorerTab(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Error Loading Table", f"Failed to load table data: {e}")
             self._set_status("Error loading table")
+
+    def _load_cache_to_grid(self, cache_name: str) -> None:
+        """Load cache data into the grid."""
+        print(f"DEBUG: Loading cache data for {cache_name}")
+        
+        try:
+            self.data_grid.clear_contents()
+            columns: List[Dict[str, str]] = []
+            rows: List[Dict[Any]] = []
+
+            if cache_name == "Table Cache":
+                table_cache = self.db_service.all_tables_info
+                if table_cache:
+                    for i, key in enumerate(table_cache[0].keys()):
+                        columns.append({"COLUMN_NAME": key, "DATA_TYPE": "unk"})
+                    
+                    rows = table_cache  
+
+            print(f"DEBUG: Cache data for {cache_name} - columns: {columns}, rows: {rows}")
+            # Load columns into grid
+            self.data_grid.load_data(columns, rows, editable=False)
+            self._set_status(f"Loaded cache: {cache_name}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error Loading Cache to Grid", f"Failed to load cache data for {cache_name}: {e}")
+            self._set_status(f"Error loading cache for {cache_name}")
 
     def _apply_dropdowns_to_grid(self, schema: str, table_name: str, columns: list[dict]) -> None:
         """Apply dropdown lookups to configured columns."""

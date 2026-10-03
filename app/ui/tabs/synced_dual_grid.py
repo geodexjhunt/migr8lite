@@ -2,7 +2,8 @@
 
 from turtle import color
 from typing import Dict, List, Any
-from PyQt6.QtWidgets import QFrame, QHeaderView, QSizePolicy, QWidget, QVBoxLayout, QSplitter, QPushButton, QHBoxLayout, QLabel
+from PyQt6.QtWidgets import QFrame, QHeaderView, QSizePolicy, QSpinBox, QWidget, QVBoxLayout, QSplitter, QPushButton, QHBoxLayout, QLabel
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QBrush, QPixmap
 from app.ui.tabs.dynamic_grid import DynamicGrid
@@ -11,7 +12,9 @@ from app.models.migration_context import MigrationContext
 
 class SyncedDualGrid(QWidget):
     """Two vertically stacked grids with synchronized column widths and horizontal scroll."""
-    
+    header_number_changed = pyqtSignal(int)
+    header_number_saved = pyqtSignal(int)
+
     def __init__(self, context: MigrationContext, parent=None):
         super().__init__(parent)
         self.context = context
@@ -50,6 +53,9 @@ class SyncedDualGrid(QWidget):
         self.legend1 = self._create_legend(self.origheadercolor,'Orig Header Row')
         self.legend2 = self._create_legend(self.preheadercolor,'Pre Header Rows')
 
+        # Create header chooser
+        self.chooser = self._header_chooser()
+
         # Splitter to allow resizing between grids
         self.splitter = QSplitter(Qt.Orientation.Vertical)
         self.splitter.addWidget(self.top_grid)
@@ -64,6 +70,7 @@ class SyncedDualGrid(QWidget):
         headerlayout.addWidget(self.toggle_top_btn)
         headerlayout.addWidget(self.legend1)
         headerlayout.addWidget(self.legend2)
+        headerlayout.addWidget(self.chooser)
         headerlayout.addStretch()
         layout.addLayout(headerlayout)
         layout.addWidget(self.splitter)
@@ -173,9 +180,7 @@ class SyncedDualGrid(QWidget):
         self.highlight_last_row_as_header(
             self.top_grid, 
             self.origheadercolor)  # Light blue, adjust to preference
-
-
-    
+   
     def get_bottom_grid(self) -> DynamicGrid:
         """Return the bottom (data) grid for direct access if needed."""
         return self.bottom_grid
@@ -259,18 +264,8 @@ class SyncedDualGrid(QWidget):
         legend_layout = QHBoxLayout()
         legend_layout.setContentsMargins(0, 0, 0, 0)  # Remove extra padding
         
-        # Create a colored swatch (small pixmap)
-        #swatch_size = 20
-        #swatch = QPixmap(swatch_size, swatch_size)
-        #swatch.fill(origheadercolor)  # Light blue, matches your header row color
-        #swatch.rect()
-
         swatch = self._create_color_swatch(origheadercolor)
-
-        # Swatch label (just displays the pixmap)
-        #swatch_label = QLabel()
-        #swatch_label.setPixmap(swatch)
-        
+       
         # Text label
         text_label = QLabel(text)
         
@@ -295,3 +290,58 @@ class SyncedDualGrid(QWidget):
         """)
         swatch_frame.setFixedSize(size, size)
         return swatch_frame
+
+    def _header_chooser(self) -> QWidget:
+        """Create a header chooser widget."""
+        chooser_widget = QWidget()
+        chooser_layout = QHBoxLayout()
+        chooser_layout.setContentsMargins(0, 0, 0, 0)
+
+        # A Label a text box formated for integers and two buttons (e.g., up/down) for adjusting the header line
+        label = QLabel("Choose Header Line:")
+        self.combo_box = QSpinBox()
+        self.combo_box.setMinimum(1)
+        self.combo_box.setMaximum(100)  # Adjust as needed for the maximum number of header lines
+        self.combo_box.setStyleSheet("""
+                QSpinBox {
+                    padding: 4px;
+                    font-size: 12px;
+                }
+                QSpinBox::up-button {
+                    width: 30px;
+                    height: 20px;
+                }
+                QSpinBox::down-button {
+                    width: 30px;
+                    height: 20px;
+                }
+                QSpinBox::up-arrow {
+                    width: 12px;
+                    height: 12px;
+                }
+                QSpinBox::down-arrow {
+                    width: 12px;
+                    height: 12px;
+                }
+            """)
+        # Populate combo_box with header options as needed
+
+        self.combo_box.valueChanged.connect(lambda value: self.header_number_changed.emit(value))
+
+        self.save_button = QPushButton("Save")
+        self.save_button.clicked.connect(lambda: self.header_number_saved.emit(self.combo_box.value()))
+                
+        chooser_layout.addWidget(label)
+        chooser_layout.addWidget(self.combo_box)
+        chooser_layout.addWidget(self.save_button)
+        chooser_layout.addStretch()
+
+        chooser_widget.setLayout(chooser_layout)
+        return chooser_widget
+
+    def set_header_number_in_chooser(self, value: int) -> None:
+        """Set the header number in the chooser widget."""
+        # stop signal temporarily to avoid triggering valueChanged
+        self.combo_box.blockSignals(True)
+        self.combo_box.setValue(value)
+        self.combo_box.blockSignals(False)

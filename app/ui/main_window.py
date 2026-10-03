@@ -139,7 +139,6 @@ class MainWindow(QMainWindow):
         self._refresh_jobrunversion_list()
         self._refresh_task_table_panel(self.migration_task_combo.currentData())
 
-
     
     def _create_view_menu(self) -> None:
         """Create view-related menu actions."""
@@ -218,7 +217,8 @@ class MainWindow(QMainWindow):
             tables = self.db_service.get_datafileobjects_for_task(task_id)
             datafiles = self.db_service.get_datafile_occurrence_number(task_id)
             
-            all_tables_info = self.context.all_tables_info  # renamed - don't shadow
+            #all_tables_info = self.context.all_tables_info  # renamed - don't shadow
+            all_tables_info = self.db_service._all_tables_info
             self.task_table_tree.clear()
 
             group_by_file = self.group_by_file.isChecked()
@@ -232,22 +232,12 @@ class MainWindow(QMainWindow):
                 #print(f"DEBUG: row folderid = {folderid!r} (type={type(folderid)})")
                 filename_dict.setdefault((folderid, filename), []).append(row)
 
-            if group_by_file:
-                for folderid in sorted({key[0] for key in filename_dict.keys()}):
-                    folder = self.db_service.get_jobfolder(folderid)
-                    if folder:
-                        folder_item = QTreeWidgetItem([f"{folder.folderpath}"])
-                        folder_item.setExpanded(True)
-                        folder_item.setData(0, Qt.ItemDataRole.UserRole, folderid)
-                        folder_item.setFlags(folder_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                        folder_item.setCheckState(0, Qt.CheckState.Unchecked)
-                        folder_item.setForeground(0, QBrush(QColor("blue")))
-                        folder_item.setBackground(0, QBrush(QColor("lightgray")))
-
             prevfolderid: int = -1      
             alldups: bool = True
+            allfileimported = True
             # Create tree structure
             for folderid, filename in sorted(filename_dict.keys()):
+                allfileimported = True
                 folder = self.db_service.get_jobfolder(folderid)
                 folderpath = folder.folderpath if folder else ""
                 fileid = filename_dict[(folderid, filename)][0]['jobfileid']
@@ -255,8 +245,18 @@ class MainWindow(QMainWindow):
                 #print(f"DEBUG: fileid = {fileid}, datafile_occurrence_number = {datafile_occurrence_number}")
                 file_item = QTreeWidgetItem([f"{filename} -- {folderpath}"])
 
-                if group_by_file and folderid != prevfolderid:
+                if group_by_file and folderid != prevfolderid :
+                    ### add the last folder to the tree before preceeding
+                    if prevfolderid != -1:
+                        if alldups:
+                            folder_item.setForeground(0, QBrush(QColor("red")))
+                        if allfolderimported:
+                            folder_item.setBackground(0, QBrush(QColor("green")))
+                        self.task_table_tree.addTopLevelItem(folder_item)
+
+                    ###
                     alldups = True
+                    allfolderimported = True
                     folder_item = QTreeWidgetItem([f"{folder.folderpath}"])
                     folder_item.setExpanded(True)
                     folder_item.setData(0, Qt.ItemDataRole.UserRole, folderid)
@@ -272,6 +272,7 @@ class MainWindow(QMainWindow):
                     alldups = False
 
                 prevfolderid = folderid
+         
                 for table in sorted(
                     filename_dict[(folderid, filename)],
                     key=lambda x: x['stagingtablename'] or "",
@@ -289,17 +290,28 @@ class MainWindow(QMainWindow):
                         )
                     )
 
+
                     item = QTreeWidgetItem(
                         [f"{table['objectname']} {'✔' if imported else '✖'} [{staging_schema or '(no schema)'}].[{staging_name or '(no staging table)'}]"]
                     )
+
+                    if imported:
+                        table['imported'] = True
+                        item.setBackground(0, QBrush(QColor("green")))
+                    else:
+                        allfileimported = False
+
                     item.setData(0, Qt.ItemDataRole.UserRole, table)
+
                     file_item.addChild(item)
 
+                if allfileimported:
+                    file_item.setBackground(0, QBrush(QColor("green")))
+                else:
+                    allfolderimported = False
+                    
                 if group_by_file:
                     folder_item.addChild(file_item)
-                    if alldups:
-                        folder_item.setForeground(0, QBrush(QColor("red")))
-                    self.task_table_tree.addTopLevelItem(folder_item)
                 else:
                     self.task_table_tree.addTopLevelItem(file_item)
 

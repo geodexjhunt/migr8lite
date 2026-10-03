@@ -51,11 +51,13 @@ class ViewOrig(QWidget):
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
 
-        title_label = QLabel("Viewing Original Extracted Data")
-        title_label.setFixedHeight(30)
-        layout.addWidget(title_label)
-
-
+        title_layout = QHBoxLayout()
+        title_layout.addWidget(QLabel("Viewing Original Extracted Data"))
+        title_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.title_info = QLabel(" Object = ?")
+        title_layout.addWidget(self.title_info) 
+        layout.addLayout(title_layout)
+        
         self.data_grid = DynamicGrid(context=self.context)
         self.data_grid.itemSelectionChanged.connect(self._on_grid_row_changed)
         self.data_grid.rowLostFocus.connect(self._on_grid_lost_focus)
@@ -140,11 +142,13 @@ class ViewOrig(QWidget):
             print(f"DEBUG: Traceback:\n{traceback.format_exc()}")
             QMessageBox.critical(self, "Save Error", error_msg)
 
-
     def _on_table_changed(self, table_info) -> None:
         """Handle table selection."""
-        schema = table_info.get("schema") if table_info else None
-        table_name = table_info.get("table_name") if table_info else None
+        schema = table_info.get("stagingtableschema") if table_info else None
+        table_name = table_info.get("stagingtablename") if table_info else None
+        object_name = table_info.get("objectname") if table_info else None
+
+        print(f"DEBUG: Table changed to schema={schema}, table_name={table_name}, object_name={object_name}")
         
         if schema is None or table_name is None:
             print("DEBUG: No table selected, clearing data grid.")
@@ -153,10 +157,18 @@ class ViewOrig(QWidget):
             self.current_table_name = None
             self.current_table_primary_keys = []
             return
+        
+        if self.db_service.table_exists(schema, table_name) is False:
+            self.title_info.setText(f"Table Not Found for {object_name}: Table {schema}.{table_name} does not exist")
+            self._set_status("Table not found")
+            return
+        
         try:
             self.current_table_schema = schema
             self.current_table_name = table_name   
-
+            self.title_info.setText(f" Object = {object_name}  : Table {schema}.{table_name}")
+            self._set_status(f"Selected table: {schema}.{table_name}")
+            
             #get pk information
             self.current_table_primary_keys = self.db_service.get_table_primary_keys(schema, table_name)
             
@@ -165,10 +177,11 @@ class ViewOrig(QWidget):
 
             if not columns:
                 QMessageBox.warning(self, "No Columns", f"Table {schema}.{table_name} has no columns")
+                self._set_status("No columns found")
                 return
 
             # Build and execute SELECT query
-            qualified_table = f"{schema}.{table_name}"
+            qualified_table = f"[{schema}].[{table_name}]"
             query = f"SELECT * FROM {qualified_table}"
             rows = self.db_service.execute_query(query)
 
@@ -180,7 +193,7 @@ class ViewOrig(QWidget):
             self.data_grid.load_data(columns, rows, editable=True)
 
             # Apply dropdowns to configured columns
-            self._apply_dropdowns_to_grid(schema, table_name, columns)         
+            #self._apply_dropdowns_to_grid(schema, table_name, columns)         
             
             row_count = len(rows) if rows else 0
             self._set_status(f"Selected: {qualified_table} - {len(columns)} columns, {row_count} rows")
@@ -250,7 +263,6 @@ class ViewOrig(QWidget):
         """Check if grid has dirty rows."""
         return len(self.data_grid.dirty_rows) > 0
 
-
     def save_pending_changes(self) -> bool:
         """Save all dirty rows; False means at least one save failed."""
         for row_idx in list(self.data_grid.dirty_rows):
@@ -292,7 +304,6 @@ class ViewOrig(QWidget):
         print(f"DEBUG: {title} - {message}")
         QMessageBox.critical(self, title, message)
         self._set_status(message)
-
 
     def _on_database_metadata_changed(self) -> None:
         """Refresh datagrid after database metadata changes."""
